@@ -12,6 +12,7 @@ import type {
   GitDiff,
   GitLogEntry,
   GitStatus,
+  InlineCompletionRequest,
   KnowledgeGraph,
   KnowledgeCompletion,
   KnowledgeCompletionRequest,
@@ -60,6 +61,7 @@ declare global {
       knowledgeStatus: () => Promise<KnowledgeStatus>
       knowledgeRetrieve: (task: string) => Promise<ContextPack>
       knowledgeComplete: (request: KnowledgeCompletionRequest) => Promise<KnowledgeCompletion[]>
+      inlineComplete: (request: InlineCompletionRequest) => Promise<string>
       knowledgeGraph: (id?: string) => Promise<KnowledgeGraph>
       sourceGraph: () => Promise<SourceGraph>
       knowledgeGet: (id: string) => Promise<{ id: string; title: string; content: string }>

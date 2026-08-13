@@ -195,6 +195,64 @@ function registerRuleProviders(): void {
 // 'typescript' and never under '*').
 const knowledgeCompletionLanguages = new Set<string>()
 
+// AI ghost-text completion: one debounced agent call per typing pause,
+// grounded in retrieved project knowledge by the main process. Registered
+// per concrete language id like the popup provider above.
+const inlineCompletionLanguages = new Set<string>()
+
+function registerInlineCompletion(languageId: string): void {
+  if (languageId === 'plaintext' || inlineCompletionLanguages.has(languageId)) return
+  inlineCompletionLanguages.add(languageId)
+
+  monaco.languages.registerInlineCompletionsProvider(languageId, {
+    async provideInlineCompletions(model, position, _context, token) {
+      // Self-debounce: monaco calls this on every keystroke; only the call
+      // that survives the pause pays for an agent round-trip.
+      await new Promise((resolveWait) => setTimeout(resolveWait, 400))
+      if (token.isCancellationRequested) return { items: [] }
+      const prefix = model.getValueInRange({
+        startLineNumber: Math.max(1, position.lineNumber - 60),
+        startColumn: 1,
+        endLineNumber: position.lineNumber,
+        endColumn: position.column
+      })
+      // Nothing typed on an empty buffer — don't burn a call on it.
+      if (prefix.trim().length < 3) return { items: [] }
+      const lastLine = Math.min(model.getLineCount(), position.lineNumber + 15)
+      const suffix = model.getValueInRange({
+        startLineNumber: position.lineNumber,
+        startColumn: position.column,
+        endLineNumber: lastLine,
+        endColumn: model.getLineMaxColumn(lastLine)
+      })
+      try {
+        const text = await window.woo.inlineComplete({
+          path: modelPath(model),
+          language: model.getLanguageId(),
+          prefix,
+          suffix,
+          terms: nearbyCompletionTerms(model, position)
+        })
+        if (token.isCancellationRequested || !text) return { items: [] }
+        return {
+          items: [{
+            insertText: text,
+            range: new monaco.Range(
+              position.lineNumber,
+              position.column,
+              position.lineNumber,
+              position.column
+            )
+          }]
+        }
+      } catch {
+        return { items: [] }
+      }
+    },
+    freeInlineCompletions() {}
+  })
+}
+
 function registerKnowledgeCompletion(languageId: string): void {
   if (knowledgeCompletionLanguages.has(languageId)) return
   knowledgeCompletionLanguages.add(languageId)
@@ -299,6 +357,7 @@ export function EditorArea({
     let cancelled = false
     void ensureMonacoLanguage(activeLanguage).then(() => {
       registerKnowledgeCompletion(activeLanguage)
+      registerInlineCompletion(activeLanguage)
       if (!cancelled) {
         setReadyLanguages((prev) => (prev[activeLanguage] ? prev : { ...prev, [activeLanguage]: true }))
       }
@@ -474,7 +533,8 @@ export function EditorArea({
                   automaticLayout: true,
                   scrollBeyondLastLine: false,
                   renderLineHighlight: 'all',
-                  suggest: { showStatusBar: true }
+                  suggest: { showStatusBar: true },
+                  inlineSuggest: { enabled: true }
                 }}
               />
             </div>

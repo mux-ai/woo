@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentSessionEvent,
   AuthProvider,
+  InlineCompletionRequest,
   KnowledgeCompletionRequest,
   SkillProvider
 } from '../shared/types'
@@ -43,6 +44,8 @@ const api = {
   knowledgeRetrieve: (task: string) => ipcRenderer.invoke('knowledge:retrieve', task),
   knowledgeComplete: (request: KnowledgeCompletionRequest) =>
     ipcRenderer.invoke('knowledge:complete', request),
+  inlineComplete: (request: InlineCompletionRequest) =>
+    ipcRenderer.invoke('agent:inlineComplete', request),
   knowledgeGraph: (id?: string) => ipcRenderer.invoke('knowledge:graph', id),
   sourceGraph: () => ipcRenderer.invoke('source:graph'),
   knowledgeGet: (id: string) => ipcRenderer.invoke('knowledge:get', id),

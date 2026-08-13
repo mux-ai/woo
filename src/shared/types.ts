@@ -95,6 +95,16 @@ export interface KnowledgeCompletion {
   kind: 'reference' | 'path'
 }
 
+export interface InlineCompletionRequest {
+  path: string
+  language: string
+  /** Code before the cursor (capped by the IPC handler). */
+  prefix: string
+  /** Code after the cursor (capped by the IPC handler). */
+  suffix: string
+  terms: string[]
+}
+
 export interface ContextTokenEstimate {
   task: string
   planningTokens: number

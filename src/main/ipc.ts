@@ -17,6 +17,7 @@ import { SkillsService } from './skillsService'
 import { VaultService } from './vaultService'
 import { KnowledgeSyncService } from './knowledge/syncService'
 import { KnowledgeCompletionService } from './knowledge/completionService'
+import { InlineCompletionService } from './inlineCompletionService'
 import { SourceGraphService } from './sourceGraphService'
 import { chooseAccount } from './modelRouter'
 import { EditorRecoveryService, WorkspaceBackupService } from './backupService'
@@ -71,6 +72,7 @@ export function registerIpc(
   let knowledge = new KnowledgeEngine(workspaceRoot, currentDataRoot)
   let broker = new SecretBroker(workspaceRoot)
   let agents = makeAgents(workspaceRoot, broker, knowledge)
+  let inlineCompletion = new InlineCompletionService(workspaceRoot, broker, knowledge)
   let knowledgeSync = new KnowledgeSyncService(workspaceRoot, knowledge)
   let sourceGraph = new SourceGraphService(workspaceRoot)
   let rules = new RuleChecker(knowledge)
@@ -163,6 +165,7 @@ export function registerIpc(
     agents.claude.stop()
     agents.codex.stop()
     agents.opencode.stop()
+    inlineCompletion.stop()
     terminal.kill()
     await watcher.stop()
 
@@ -174,6 +177,7 @@ export function registerIpc(
     knowledge = nextKnowledge
     broker = nextBroker
     agents = nextAgents
+    inlineCompletion = new InlineCompletionService(nextRoot, nextBroker, nextKnowledge)
     knowledgeSync = nextKnowledgeSync
     sourceGraph = nextSourceGraph
     rules = nextRules
@@ -368,6 +372,25 @@ export function registerIpc(
       prefix,
       terms
     } satisfies KnowledgeCompletionRequest)
+  })
+  handle('agent:inlineComplete', async (_e, value) => {
+    if (value == null || typeof value !== 'object') {
+      throw new Error('completion request must be an object')
+    }
+    const request = value as Record<string, unknown>
+    const path = assertString(request.path, 'completion path')
+    files.absolute(path)
+    if (!broker.checkPath(path).allowed) return ''
+    const language = assertString(request.language, 'completion language').slice(0, 40)
+    const prefix = assertString(request.prefix, 'completion prefix').slice(-2_000)
+    const suffix = assertString(request.suffix, 'completion suffix').slice(0, 500)
+    if (!Array.isArray(request.terms) || request.terms.length > 32) {
+      throw new Error('completion terms must be an array of at most 32 strings')
+    }
+    const terms = request.terms.map((term, index) =>
+      assertString(term, `completion term ${index}`).slice(0, 80)
+    )
+    return inlineCompletion.complete({ path, language, prefix, suffix, terms })
   })
   handle('knowledge:graph', (_e, id) =>
     knowledge.graph(id == null ? undefined : assertString(id, 'id'))
