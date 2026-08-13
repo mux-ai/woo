@@ -24,6 +24,9 @@ self.MonacoEnvironment = {
 
 loader.config({ monaco })
 
+// Expose for e2e probes/debugging (matches what monaco's own AMD build does).
+;(globalThis as { monaco?: typeof monaco }).monaco = monaco
+
 monaco.editor.defineTheme('woo-dark', {
   base: 'vs-dark',
   inherit: true,

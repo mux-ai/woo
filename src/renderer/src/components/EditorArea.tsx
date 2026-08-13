@@ -186,13 +186,35 @@ function registerRuleProviders(): void {
     }
   })
 
-  monaco.languages.registerCompletionItemProvider('*', {
+}
+
+// Knowledge completions must be registered per concrete language id: monaco
+// consults string-'*' completion providers only on explicit trigger
+// (Ctrl/Cmd+Space), never during as-you-type quick-suggest sessions
+// (verified live — an identical provider fired on every keystroke under
+// 'typescript' and never under '*').
+const knowledgeCompletionLanguages = new Set<string>()
+
+function registerKnowledgeCompletion(languageId: string): void {
+  if (knowledgeCompletionLanguages.has(languageId)) return
+  knowledgeCompletionLanguages.add(languageId)
+
+  monaco.languages.registerCompletionItemProvider(languageId, {
     async provideCompletionItems(model, position, _context, token) {
-      // The custom Ctrl/Cmd+Space action sets this flag. Normal typing keeps
-      // Monaco's own language suggestions but does not query project knowledge.
-      if (!knowledgeCompletionRequested) return { suggestions: [] }
+      // Knowledge suggestions ride along with normal as-you-type completion;
+      // the custom Ctrl/Cmd+Space action sets this flag to also answer with
+      // an empty prefix.
+      const explicit = knowledgeCompletionRequested
       knowledgeCompletionRequested = false
       const word = model.getWordUntilPosition(position)
+      // Query from the first typed character: monaco drops an empty result
+      // container and never re-asks the provider as the word grows (verified
+      // live — a min-length threshold here starves the popup permanently),
+      // so the only gate is an empty prefix, which would dump unfiltered
+      // knowledge items into every member-access popup. incomplete keeps
+      // monaco re-querying while the word grows instead of just filtering
+      // the first response.
+      if (!explicit && word.word.length === 0) return { suggestions: [] }
       try {
         const suggestions = await window.woo.knowledgeComplete({
           path: modelPath(model),
@@ -208,6 +230,7 @@ function registerRuleProviders(): void {
           word.endColumn
         )
         return {
+          incomplete: true,
           suggestions: suggestions.map((suggestion, index) => ({
             label: suggestion.label,
             insertText: suggestion.insertText,
@@ -262,6 +285,26 @@ export function EditorArea({
   // Keep the module-level refs the Monaco providers read in sync.
   currentHandlers = ruleActions
   currentDiagnostics = diagnostics
+
+  // Monaco languages must be registered BEFORE the model is created: a model
+  // born under an unregistered id falls back to plaintext AND consumes the
+  // one-shot rich-language-features request for that id, so the language
+  // service's onLanguage hook (which boots the tsMode/jsonMode/etc. worker)
+  // never fires — highlighting and IntelliSense both stay dead (verified
+  // live against the packaged app). Gate <Editor> mount on registration;
+  // after the first load per language group this resolves synchronously.
+  const activeLanguage = active ? language(active.path) : 'plaintext'
+  const [readyLanguages, setReadyLanguages] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    let cancelled = false
+    void ensureMonacoLanguage(activeLanguage).then(() => {
+      registerKnowledgeCompletion(activeLanguage)
+      if (!cancelled) {
+        setReadyLanguages((prev) => (prev[activeLanguage] ? prev : { ...prev, [activeLanguage]: true }))
+      }
+    })
+    return () => { cancelled = true }
+  }, [activeLanguage])
 
   // Push rule violations into Monaco markers for the active file.
   useEffect(() => {
@@ -414,6 +457,8 @@ export function EditorArea({
             <div className="markdown-preview">
               <Markdown text={active.content ?? ''} />
             </div>
+          ) : !readyLanguages[activeLanguage] ? (
+            <div className="editor-host" />
           ) : (
             <div className="editor-host">
               <Editor
