@@ -80,7 +80,12 @@ try {
     `--workspace=${workspace}`,
     `--user-data-dir=${profile}`,
     `--remote-debugging-port=${port}`,
-    '--disable-gpu'
+    '--disable-gpu',
+    // ubuntu-24.04 CI runners restrict unprivileged user namespaces via
+    // AppArmor, so Chromium's SUID sandbox helper aborts the app before CDP
+    // comes up ("The SUID sandbox helper binary was found, but is not
+    // configured correctly"). The sandbox is not what this smoke verifies.
+    ...(process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [])
   ], {
     env: { ...process.env, WOO_SMOKE_TEST: '1' },
     stdio: ['ignore', 'pipe', 'pipe']

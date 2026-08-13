@@ -169,6 +169,16 @@ export class SecretBroker {
     const absolute = resolve(isAbsolute(filePath) ? filePath : join(this.workspaceRoot, filePath))
     const root = resolve(this.workspaceRoot)
     const lexicalRelative = relative(root, absolute)
+    // The boundary check compares the file's REAL path, so the root must be
+    // realpath'd too: macOS tmpdir lives behind the /var -> /private/var
+    // symlink and Windows expands 8.3 short names (RUNNER~1), so a lexical
+    // root makes every in-workspace file look like an escape.
+    let realRoot = root
+    try {
+      realRoot = realpathSync.native(root)
+    } catch {
+      // Root not on disk yet — lexical comparison is the best available.
+    }
     let resolved = absolute
     try {
       resolved = realpathSync.native(absolute)
@@ -183,7 +193,7 @@ export class SecretBroker {
         }
       }
     }
-    const realRelative = relative(root, resolved)
+    const realRelative = relative(realRoot, resolved)
     if (
       lexicalRelative === '..' ||
       lexicalRelative.startsWith(`..${sep}`) ||

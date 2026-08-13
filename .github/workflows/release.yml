@@ -43,7 +43,9 @@ jobs:
       id-token: write
       attestations: write
     env:
-      WOO_REQUIRE_SIGNING: ${{ runner.os == 'Linux' && '0' || '1' }}
+      # 'runner' context is not available in job-level env (it invalidates
+      # the whole workflow file); derive the flag from the matrix instead.
+      WOO_REQUIRE_SIGNING: ${{ matrix.platform == 'linux' && '0' || '1' }}
       CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -72,7 +74,8 @@ jobs:
           subject-path: release/Woo-Studio-*
 
       - name: Attest release SBOM
-        uses: actions/attest@v4
+        # actions/attest has no sbom-path input — SBOM attestation is its own action.
+        uses: actions/attest-sbom@v4
         with:
           subject-path: release/Woo-Studio-*
           sbom-path: release/Woo-Studio-${{ matrix.platform }}.sbom.cdx.json

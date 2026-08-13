@@ -62,6 +62,26 @@ describe('SecretBroker.checkPath (SEC-001)', () => {
     expect(broker.checkPath(p).allowed).toBe(true)
   })
 
+  it('handles a workspace root that is itself behind a symlink (macOS /var -> /private/var, Windows 8.3 names)', () => {
+    // Regression for CI-only failure: checkPath realpaths the FILE but
+    // compared it against the lexical root, so on macOS/Windows every
+    // in-workspace path looked like a workspace escape and even the human
+    // whitelist could not override the denial.
+    if (process.platform === 'win32') return
+    const alias = join(tmpdir(), `woo-broker-alias-${Date.now()}`)
+    symlinkSync(root, alias)
+    try {
+      const broker = new SecretBroker(alias)
+      expect(broker.checkPath(join(alias, 'src', 'index.ts')).allowed).toBe(true)
+      const p = join(alias, '.env')
+      expect(broker.checkPath(p).allowed).toBe(false)
+      broker.whitelistPath(p)
+      expect(broker.checkPath(p).allowed).toBe(true)
+    } finally {
+      rmSync(alias, { force: true })
+    }
+  })
+
   it('denies paths outside the workspace and symlinks that escape it', () => {
     const broker = new SecretBroker(root)
     expect(broker.checkPath(join(root, '..', 'outside.txt')).allowed).toBe(false)
