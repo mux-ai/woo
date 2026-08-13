@@ -74,7 +74,7 @@ export function registerIpc(
   let broker = new SecretBroker(workspaceRoot)
   let agents = makeAgents(workspaceRoot, broker, knowledge)
   let inlineCompletion = new InlineCompletionService(workspaceRoot, broker, knowledge)
-  let knowledgeSync = new KnowledgeSyncService(workspaceRoot, knowledge)
+  let knowledgeSync = new KnowledgeSyncService(workspaceRoot, knowledge, currentDataRoot)
   // Manual-edit AI sync: reviews arrive through the same agent-event channel
   // and the same apply/dismiss handlers as agent-task sync reviews.
   const notifyManualSync = (review: import('../shared/types').KnowledgeSyncReview): void => {
@@ -82,7 +82,15 @@ export function registerIpc(
       win.webContents.send('agent:event', { type: 'knowledge-sync', sync: review })
     }
   }
-  let manualSync = new ManualKnowledgeSync(workspaceRoot, broker, knowledge, knowledgeSync, notifyManualSync)
+  let manualSync = new ManualKnowledgeSync(
+    workspaceRoot, broker, knowledge, knowledgeSync, notifyManualSync,
+    undefined, undefined, currentDataRoot
+  )
+  // Resume what the previous session left behind (queued saves / an
+  // un-actioned review) once the renderer can actually show it.
+  win.webContents.once('did-finish-load', () => {
+    setTimeout(() => { void manualSync.restore() }, 2_000)
+  })
   let sourceGraph = new SourceGraphService(workspaceRoot)
   let rules = new RuleChecker(knowledge)
   let git = new GitService(workspaceRoot)
@@ -157,7 +165,7 @@ export function registerIpc(
     const nextKnowledge = new KnowledgeEngine(nextRoot, nextDataRoot)
     const nextBroker = new SecretBroker(nextRoot)
     const nextAgents = makeAgents(nextRoot, nextBroker, nextKnowledge)
-    const nextKnowledgeSync = new KnowledgeSyncService(nextRoot, nextKnowledge)
+    const nextKnowledgeSync = new KnowledgeSyncService(nextRoot, nextKnowledge, nextDataRoot)
     const nextSourceGraph = new SourceGraphService(nextRoot)
     const nextRules = new RuleChecker(nextKnowledge)
     const nextGit = new GitService(nextRoot)
@@ -189,7 +197,11 @@ export function registerIpc(
     inlineCompletion = new InlineCompletionService(nextRoot, nextBroker, nextKnowledge)
     knowledgeSync = nextKnowledgeSync
     manualSync.stop()
-    manualSync = new ManualKnowledgeSync(nextRoot, nextBroker, nextKnowledge, nextKnowledgeSync, notifyManualSync)
+    manualSync = new ManualKnowledgeSync(
+      nextRoot, nextBroker, nextKnowledge, nextKnowledgeSync, notifyManualSync,
+      undefined, undefined, nextDataRoot
+    )
+    void manualSync.restore()
     sourceGraph = nextSourceGraph
     rules = nextRules
     git = nextGit

@@ -46,8 +46,49 @@ export class ManualKnowledgeSync {
     private sync: KnowledgeSyncService,
     private notify: (review: KnowledgeSyncReview) => void,
     private queryClient: ClaudeQuery = query,
-    private debounceMs = DEBOUNCE_MS
+    private debounceMs = DEBOUNCE_MS,
+    /** Where the save queue survives app exit; omit for memory-only. */
+    private persistDir?: string
   ) {}
+
+  private queuePath(): string | null {
+    return this.persistDir ? join(this.persistDir, 'manual-sync-queue.json') : null
+  }
+
+  private persistQueue(): void {
+    const path = this.queuePath()
+    if (!path) return
+    void fs
+      .mkdir(this.persistDir!, { recursive: true })
+      .then(() =>
+        this.pendingPaths.size === 0
+          ? fs.rm(path, { force: true })
+          : fs.writeFile(path, JSON.stringify([...this.pendingPaths]), { encoding: 'utf-8', mode: 0o600 })
+      )
+      .catch(() => {})
+  }
+
+  /**
+   * Reload state a previous session left behind: a pending review goes
+   * straight back to the UI; queued-but-unreviewed saves re-arm the
+   * debounce timer. Call once, after the window can receive events.
+   */
+  async restore(): Promise<void> {
+    const review = await this.sync.restorePersisted()
+    if (review) this.notify(review)
+    const path = this.queuePath()
+    if (!path) return
+    try {
+      const stored = JSON.parse(await fs.readFile(path, 'utf-8'))
+      if (Array.isArray(stored)) {
+        for (const entry of stored) {
+          if (typeof entry === 'string') this.noteSaved(entry)
+        }
+      }
+    } catch {
+      // No queue or unreadable — nothing to resume.
+    }
+  }
 
   /** Call on every successful editor save (workspace-relative path). */
   noteSaved(path: string): void {
@@ -56,6 +97,7 @@ export class ManualKnowledgeSync {
     if (path.startsWith('.woo/') || path.startsWith('.git/')) return
     if (!this.broker.checkPath(path).allowed) return
     this.pendingPaths.add(path)
+    this.persistQueue()
     if (this.timer) clearTimeout(this.timer)
     this.timer = setTimeout(() => {
       void this.flush()
@@ -77,6 +119,7 @@ export class ManualKnowledgeSync {
     if (this.running || this.pendingPaths.size === 0) return
     const changedFiles = [...this.pendingPaths].slice(0, MAX_BATCH_FILES)
     this.pendingPaths.clear()
+    this.persistQueue()
     this.running = true
     try {
       const review = await this.review(changedFiles)
@@ -191,7 +234,7 @@ export class ManualKnowledgeSync {
 
     const drafts = this.parseProposals(text, candidates)
     if (drafts.length === 0) return null
-    const review = this.sync.registerReview(
+    const review = await this.sync.registerReview(
       `Manual edits: ${changedFiles.join(', ')}`.slice(0, 200),
       changedFiles,
       drafts

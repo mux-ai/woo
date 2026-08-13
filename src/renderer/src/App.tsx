@@ -301,13 +301,70 @@ export function App() {
   )
   openFileRef.current = openFile
 
+  // Autosave: write the live buffer to disk after a 2s typing pause, feeding
+  // rules and knowledge sync without a manual Ctrl+S. Timers are per-path so
+  // switching files never flushes a half-typed edit early; the ref (not
+  // state) drives the timers because later keystrokes on an already-dirty
+  // file don't change React state.
+  const [autosave, setAutosave] = useState(() => localStorage.getItem('woo-autosave') !== 'off')
+  const autosaveRef = useRef(autosave)
+  autosaveRef.current = autosave
+  const autosaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // Live buffer text per path, updated on every keystroke. The autosave
+  // writer compares against it after the async write: if the buffer moved on
+  // meanwhile, updating the controlled `value` prop would rewrite the editor
+  // with stale text and eat the newest keystrokes — skip, the next pause
+  // saves again.
+  const liveValues = useRef<Record<string, string>>({})
+  const toggleAutosave = useCallback(() => {
+    setAutosave((prev) => {
+      const next = !prev
+      localStorage.setItem('woo-autosave', next ? 'on' : 'off')
+      if (!next) {
+        for (const timer of Object.values(autosaveTimers.current)) clearTimeout(timer)
+        autosaveTimers.current = {}
+      }
+      return next
+    })
+  }, [])
+
+  const autosaveWrite = useCallback(async (path: string, value: string) => {
+    try {
+      await window.woo.filesWrite(path, value)
+    } catch {
+      return // disk write failed — buffer stays dirty, manual save still works
+    }
+    if (liveValues.current[path] !== undefined && liveValues.current[path] !== value) {
+      return // buffer moved on during the write — next pause re-saves
+    }
+    setOpenFiles((prev) =>
+      prev.map((f) => (f.path === path ? { ...f, content: value, dirty: false } : f))
+    )
+    try {
+      const diags = await window.woo.rulesCheck(path, value)
+      setDiagnostics((prev) => [...prev.filter((d) => d.file !== path), ...diags])
+    } catch {
+      // rules re-run on the next save
+    }
+  }, [])
+
   const markDirty = useCallback((path: string, currentValue: string) => {
+    liveValues.current[path] = currentValue
     setOpenFiles((prev) =>
       prev.map((f) =>
         f.path === path ? { ...f, dirty: f.content != null && currentValue !== f.content } : f
       )
     )
-  }, [])
+    if (!autosaveRef.current) return
+    clearTimeout(autosaveTimers.current[path])
+    autosaveTimers.current[path] = setTimeout(() => {
+      delete autosaveTimers.current[path]
+      const file = openFilesRef.current.find((f) => f.path === path)
+      if (file && file.content != null && file.content !== currentValue) {
+        void autosaveWrite(path, currentValue)
+      }
+    }, 2000)
+  }, [autosaveWrite])
 
   const closeFile = useCallback(
     (path: string) => {
@@ -1043,7 +1100,14 @@ export function App() {
           </>
         )}
       </div>
-      <StatusBar errors={errors} warnings={warnings} infos={infos} knowledgeReady={!!workspace?.knowledgeReady} />
+      <StatusBar
+        errors={errors}
+        warnings={warnings}
+        infos={infos}
+        knowledgeReady={!!workspace?.knowledgeReady}
+        autosave={autosave}
+        onToggleAutosave={toggleAutosave}
+      />
       {paletteOpen && <CommandPalette items={paletteItems} onClose={() => setPaletteOpen(false)} />}
     </div>
   )

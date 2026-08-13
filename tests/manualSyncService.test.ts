@@ -63,10 +63,10 @@ function textSession(text: string, onArgs?: (args: any) => void) {
   }) as any
 }
 
-function make(replyText: string, onArgs?: (args: any) => void) {
+function make(replyText: string, onArgs?: (args: any) => void, persistDir?: string) {
   const broker = new SecretBroker(root)
   const knowledge = knowledgeWithDoc()
-  const sync = new KnowledgeSyncService(root, knowledge)
+  const sync = new KnowledgeSyncService(root, knowledge, persistDir)
   const reviews: KnowledgeSyncReview[] = []
   const manual = new ManualKnowledgeSync(
     root,
@@ -75,7 +75,8 @@ function make(replyText: string, onArgs?: (args: any) => void) {
     sync,
     (review) => reviews.push(review),
     textSession(replyText, onArgs),
-    50
+    50,
+    persistDir
   )
   return { manual, sync, reviews }
 }
@@ -143,5 +144,61 @@ describe('ManualKnowledgeSync', () => {
     manual.noteSaved('app.ts')
     await new Promise((resolveWait) => setTimeout(resolveWait, 200))
     expect(reviews.length).toBe(1)
+  })
+
+  it('persists an un-actioned review across sessions and applies after restore', async () => {
+    const persistDir = join(root, 'data')
+    const first = make(proposalReply, undefined, persistDir)
+    first.manual.noteSaved('app.ts')
+    await first.manual.flush()
+    expect(first.reviews.length).toBe(1)
+    // "exit without acting" — new session, fresh services, same persistDir
+    const second = make('[]', undefined, persistDir)
+    await second.manual.restore()
+    expect(second.reviews.length).toBe(1)
+    const review = second.reviews[0]
+    await second.sync.apply(review.id, [review.proposals[0].id])
+    expect(readFileSync(join(root, DOC_PATH), 'utf8')).toBe(DOC_UPDATED)
+  })
+
+  it('drops a persisted review whose target doc changed while the app was closed', async () => {
+    const persistDir = join(root, 'data')
+    const first = make(proposalReply, undefined, persistDir)
+    first.manual.noteSaved('app.ts')
+    await first.manual.flush()
+    writeFileSync(join(root, DOC_PATH), DOC_ORIGINAL + '\nEdited meanwhile.\n')
+    const second = make('[]', undefined, persistDir)
+    await second.manual.restore()
+    expect(second.reviews).toEqual([])
+  })
+
+  it('persists queued saves that never reached review and resumes them on restore', async () => {
+    const persistDir = join(root, 'data')
+    // Long debounce = the app "exits" before the review ever runs.
+    const broker = new SecretBroker(root)
+    const knowledge = knowledgeWithDoc()
+    const sync = new KnowledgeSyncService(root, knowledge, persistDir)
+    const idle = new ManualKnowledgeSync(root, broker, knowledge, sync, () => {}, textSession('[]'), 60_000, persistDir)
+    idle.noteSaved('app.ts')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+    idle.stop()
+
+    const resumed = make(proposalReply, undefined, persistDir)
+    await resumed.manual.restore()
+    await resumed.manual.flush()
+    expect(resumed.reviews.length).toBe(1)
+    expect(resumed.reviews[0].changedFiles).toEqual(['app.ts'])
+  })
+
+  it('apply and dismiss clear the persisted review', async () => {
+    const persistDir = join(root, 'data')
+    const first = make(proposalReply, undefined, persistDir)
+    first.manual.noteSaved('app.ts')
+    await first.manual.flush()
+    first.sync.dismiss(first.reviews[0].id)
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+    const second = make('[]', undefined, persistDir)
+    await second.manual.restore()
+    expect(second.reviews).toEqual([])
   })
 })

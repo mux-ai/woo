@@ -1557,6 +1557,15 @@ code, pre, .agent-stream, .context-raw {
 .status-dot.off { background: var(--text-faint); }
 .status-spacer { flex: 1; }
 .status-diags { color: var(--text-dim); }
+.status-toggle {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.status-toggle:hover { color: var(--text); }
 
 @media (max-width: 1100px) {
   .sidebar { width: 210px; }

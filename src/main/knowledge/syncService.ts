@@ -143,7 +143,9 @@ export class KnowledgeSyncService {
 
   constructor(
     private workspaceRoot: string,
-    private knowledge: KnowledgeEngine
+    private knowledge: KnowledgeEngine,
+    /** Where manual-edit reviews survive app exit; omit for memory-only. */
+    private persistDir?: string
   ) {}
 
   async snapshot(): Promise<WorkspaceSnapshot> {
@@ -278,18 +280,20 @@ export class KnowledgeSyncService {
       await fs.writeFile(join(this.workspaceRoot, proposal.path), proposal.proposedContent, 'utf-8')
     }
     this.pending.delete(reviewId)
+    await this.removePersistedReview()
     return { updatedPaths: (proposals as PendingProposal[]).map((proposal) => proposal.path) }
   }
 
-  dismiss(reviewId: string): void {
+  async dismiss(reviewId: string): Promise<void> {
     this.pending.delete(reviewId)
+    await this.removePersistedReview()
   }
 
   /**
    * Register a review whose proposals were produced elsewhere (e.g. the
    * manual-edit AI sync) so apply()/dismiss() serve it like any other.
    */
-  registerReview(task: string, changedFiles: string[], drafts: ProposalDraft[]): KnowledgeSyncReview {
+  async registerReview(task: string, changedFiles: string[], drafts: ProposalDraft[]): Promise<KnowledgeSyncReview> {
     const internal = new Map<string, PendingProposal>()
     for (const draft of drafts) {
       const id = randomUUID()
@@ -300,6 +304,74 @@ export class KnowledgeSyncService {
     const proposals = [...internal.values()].map(
       ({ originalContent: _original, proposedContent: _proposed, ...proposal }) => proposal
     )
-    return { id: reviewId, task, changedFiles, proposals }
+    const review: KnowledgeSyncReview = { id: reviewId, task, changedFiles, proposals }
+    await this.persistReview(review, internal)
+    return review
+  }
+
+  // ── Exit persistence for externally-registered (manual-edit) reviews ────
+  // One un-actioned review may outlive the process: registerReview writes it
+  // to the workspace data dir, apply/dismiss remove it, restorePersisted()
+  // re-registers it on the next launch after re-validating every proposal
+  // against the docs on disk. Agent-task reviews stay memory-only.
+
+  private persistedReviewPath(): string | null {
+    return this.persistDir ? join(this.persistDir, 'manual-sync-review.json') : null
+  }
+
+  private async persistReview(review: KnowledgeSyncReview, internal: Map<string, PendingProposal>): Promise<void> {
+    const path = this.persistedReviewPath()
+    if (!path) return
+    try {
+      await fs.mkdir(this.persistDir!, { recursive: true })
+      await fs.writeFile(
+        path,
+        JSON.stringify({ ...review, proposals: [...internal.values()] }),
+        { encoding: 'utf-8', mode: 0o600 }
+      )
+    } catch {
+      // Persistence is best-effort; the in-memory review still works.
+    }
+  }
+
+  private async removePersistedReview(): Promise<void> {
+    const path = this.persistedReviewPath()
+    if (path) await fs.rm(path, { force: true }).catch(() => {})
+  }
+
+  async restorePersisted(): Promise<KnowledgeSyncReview | null> {
+    const path = this.persistedReviewPath()
+    if (!path) return null
+    let stored: KnowledgeSyncReview & { proposals: PendingProposal[] }
+    try {
+      stored = JSON.parse(await fs.readFile(path, 'utf-8'))
+    } catch {
+      return null
+    }
+    if (!stored || typeof stored.id !== 'string' || !Array.isArray(stored.proposals)) return null
+    // Drop proposals whose target doc changed since the preview was written —
+    // apply() would refuse them anyway.
+    const internal = new Map<string, PendingProposal>()
+    for (const proposal of stored.proposals) {
+      try {
+        const current = await fs.readFile(join(this.workspaceRoot, proposal.path), 'utf-8')
+        if (current === proposal.originalContent) internal.set(proposal.id, proposal)
+      } catch {
+        // Doc gone — drop.
+      }
+    }
+    if (internal.size === 0) {
+      await this.removePersistedReview()
+      return null
+    }
+    this.pending.set(stored.id, { proposals: internal })
+    return {
+      id: stored.id,
+      task: stored.task,
+      changedFiles: stored.changedFiles,
+      proposals: [...internal.values()].map(
+        ({ originalContent: _original, proposedContent: _proposed, ...proposal }) => proposal
+      )
+    }
   }
 }
