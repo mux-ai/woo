@@ -1,4 +1,4 @@
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { query, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '@anthropic-ai/claude-agent-sdk'
 import { isAbsolute, join } from 'path'
 import type {
   AgentPlan,
@@ -45,7 +45,11 @@ const FILE_TOOLS_WITH_PATH: Record<string, string> = {
   NotebookEdit: 'notebook_path'
 }
 
-const CLAUDE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash']
+// 'Skill' must be in this base-tools whitelist: `tools` is a restrictive
+// list of built-ins, and without the Skill tool `skills: 'all'` loads
+// nothing — verified live (2026-08-14): the model saw no skill listing and
+// resorted to Glob/Read-ing SKILL.md files by hand.
+const CLAUDE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', 'Skill']
 
 export interface AgentRunnerTiming {
   planTimeoutMs: number
@@ -60,6 +64,21 @@ const DEFAULT_TIMING: AgentRunnerTiming = {
 }
 
 export type ClaudeQuery = typeof query
+
+/**
+ * Prompt caching (Anthropic prompt cache, via the SDK's systemPrompt cache
+ * boundary): project policy + retrieved knowledge are project-stable and
+ * often byte-identical across calls — always so when context is pinned
+ * (same pack reused by both plan() and runTask()), and opportunistically
+ * whenever consecutive tasks retrieve the same docs. Putting them ahead of
+ * SYSTEM_PROMPT_DYNAMIC_BOUNDARY marks them as the cacheable prefix instead
+ * of paying full price to reprocess them on every call. Task-specific text
+ * (the actual ask) stays in `prompt` — it never repeats, so caching it
+ * would only add the cache-write premium for no future hit.
+ */
+function cacheableSystemPrompt(staticBlock: string): string[] | undefined {
+  return staticBlock ? [staticBlock, SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : undefined
+}
 
 export class AgentRunner {
   private aborter: AbortController | null = null
@@ -195,12 +214,10 @@ export class AgentRunner {
     }, this.timing.planTimeoutMs)
     try {
       session = this.queryClient({
-        prompt:
-          policyBlock +
-          contextBlock +
-          `If this is casual conversation, a greeting, or a question that isn't asking for a code change, reply with exactly this line and nothing else: NOT_A_TASK\nOtherwise produce a short numbered implementation plan (3-6 steps, one line each, no preamble) for this task. Do not execute anything.\n\nTask: ${task}`,
+        prompt: `If this is casual conversation, a greeting, or a question that isn't asking for a code change, reply with exactly this line and nothing else: NOT_A_TASK\nOtherwise produce a short numbered implementation plan (3-6 steps, one line each, no preamble) for this task. Do not execute anything.\n\nTask: ${task}`,
         options: {
           cwd: this.workspaceRoot,
+          systemPrompt: cacheableSystemPrompt(policyBlock + contextBlock),
           abortController: controller,
           permissionMode: 'default',
           tools: [],
@@ -353,9 +370,10 @@ export class AgentRunner {
     )
     try {
       session = this.queryClient({
-        prompt: policyBlock + contextBlock + planBlock + task,
+        prompt: planBlock + task,
         options: {
           cwd: this.workspaceRoot,
+          systemPrompt: cacheableSystemPrompt(policyBlock + contextBlock),
           abortController: controller,
           permissionMode: 'default',
           // `tools` controls availability only. Never use `allowedTools` here:
@@ -371,13 +389,17 @@ export class AgentRunner {
           // model writes, instead of only whole assistant messages.
           includePartialMessages: true,
           env: this.buildAgentEnv(),
-          // SDK isolation mode: block the operator's own ~/.claude/CLAUDE.md
-          // and settings.json from steering the task — found via live test
-          // (2026-08-10) where a connected account's personal global
-          // CLAUDE.md hijacked a "create a todo app" run entirely.
-          // policyBlock above (projectPolicyPrompt) is the sole instruction
-          // source; skills:'all' is a separate, unaffected discovery path.
-          settingSources: [],
+          // Partial SDK isolation: 'user' stays blocked — the operator's own
+          // ~/.claude/CLAUDE.md and settings.json must not steer the task
+          // (live test 2026-08-10: a connected account's personal global
+          // CLAUDE.md hijacked a "create a todo app" run entirely). 'project'
+          // must be loaded though: filesystem skill discovery rides on
+          // setting sources, and with [] the model gets NO workspace skill
+          // listing at all — skills:'all' alone is NOT a separate discovery
+          // path (verified live 2026-08-14). Workspace-scoped instructions
+          // are in-scope by design; account-scope skills (~/.claude/skills)
+          // remain unloaded because they'd require the 'user' source.
+          settingSources: ['project'],
           hooks: {
             // SEC-001: this is the authoritative pre-execution boundary.
             // It still runs when SDK permission rules bypass canUseTool.

@@ -38,6 +38,21 @@ import { KnowledgeEngine } from './knowledge/engine'
 import { SecretBroker } from './secretBroker'
 import { projectPolicyPrompt } from './projectPolicy'
 
+export interface CodexAgentRunnerTiming {
+  planTimeoutMs: number
+  idleTimeoutMs: number
+  totalTimeoutMs: number
+}
+
+// Same values as agentRunner.ts's Claude runner — the SDK exposes no native
+// turn/time cap (TurnOptions is just { outputSchema?, signal? }), so a
+// stalled Codex call previously hung forever with no user-visible recourse.
+const DEFAULT_TIMING: CodexAgentRunnerTiming = {
+  planTimeoutMs: 120_000,
+  idleTimeoutMs: 180_000,
+  totalTimeoutMs: 15 * 60_000
+}
+
 interface CodexThreadLike {
   run(input: string, options?: TurnOptions): Promise<{ finalResponse: string }>
   runStreamed(
@@ -105,13 +120,17 @@ export class CodexAgentRunner {
   private aborter: AbortController | null = null
   private pinned = false
   private lastPack: ContextPack | null = null
+  private timing: CodexAgentRunnerTiming
 
   constructor(
     private workspaceRoot: string,
     private broker: SecretBroker,
     private knowledge: KnowledgeEngine,
-    private clientFactory: CodexClientFactory = defaultClientFactory
-  ) {}
+    private clientFactory: CodexClientFactory = defaultClientFactory,
+    timing: Partial<CodexAgentRunnerTiming> = {}
+  ) {
+    this.timing = { ...DEFAULT_TIMING, ...timing }
+  }
 
   stop(): void {
     this.aborter?.abort()
@@ -221,6 +240,12 @@ export class CodexAgentRunner {
       : ''
     const policy = await projectPolicyPrompt(this.workspaceRoot)
     const security = this.securityContext()
+    const controller = new AbortController()
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, this.timing.planTimeoutMs)
     try {
       const client = await this.client(security.hookCommand)
       // Plan tier follows the same difficulty scorer as execution — strong
@@ -228,11 +253,18 @@ export class CodexAgentRunner {
       const thread = client.startThread(
         this.threadOptions('read-only', chooseModel('codex', task).tier)
       )
-      const result = await thread.run(
-        policy +
-          context +
-          `If this is casual conversation, a greeting, or a question that isn't asking for a code change, reply with exactly this line and nothing else: NOT_A_TASK\nOtherwise produce a short numbered implementation plan (3-6 steps, one line each, no preamble). Do not execute anything.\n\nTask: ${task}`
-      )
+      let result: { finalResponse: string }
+      try {
+        result = await thread.run(
+          policy +
+            context +
+            `If this is casual conversation, a greeting, or a question that isn't asking for a code change, reply with exactly this line and nothing else: NOT_A_TASK\nOtherwise produce a short numbered implementation plan (3-6 steps, one line each, no preamble). Do not execute anything.\n\nTask: ${task}`,
+          { signal: controller.signal }
+        )
+      } catch (error) {
+        if (timedOut) throw new Error('Codex planning timed out before it completed.')
+        throw error
+      }
       const steps = this.broker
         .scrub(result.finalResponse)
         .split('\n')
@@ -241,6 +273,7 @@ export class CodexAgentRunner {
         .map((line) => line.replace(/^\d+[.)]\s+/, ''))
       return { task, steps }
     } finally {
+      clearTimeout(timeout)
       security.cleanup()
     }
   }
@@ -288,16 +321,53 @@ export class CodexAgentRunner {
       'Woo security boundary: never read secret-bearing files such as .env, private keys, credentials, .npmrc, or secret stores; never dump the process environment.\n\n'
     const policyBlock = await projectPolicyPrompt(this.workspaceRoot)
     this.aborter = new AbortController()
+    const controller = this.aborter
     const seenTools = new Set<string>()
     const security = this.securityContext()
+    // The SDK exposes no native turn/time cap (TurnOptions is just
+    // { outputSchema?, signal? }) — without this, a stalled Codex task hangs
+    // forever with only the manual Stop button as recourse.
+    let terminalEmitted = false
+    let timedOut = false
+    const emitDone = () => {
+      if (terminalEmitted) return
+      terminalEmitted = true
+      onEvent({ type: 'done' })
+    }
+    const emitError = (error: string) => {
+      if (terminalEmitted) return
+      terminalEmitted = true
+      onEvent({ type: 'error', error: this.broker.scrub(error) })
+    }
+    const abortForTimeout = (message: string) => {
+      if (terminalEmitted) return
+      timedOut = true
+      emitError(message)
+      controller.abort()
+    }
+    let idleTimer: ReturnType<typeof setTimeout> | null = null
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      if (terminalEmitted) return
+      idleTimer = setTimeout(
+        () => abortForTimeout('Codex stopped making progress and was terminated.'),
+        this.timing.idleTimeoutMs
+      )
+    }
+    resetIdleTimer()
+    const totalTimer = setTimeout(
+      () => abortForTimeout('Codex exceeded the maximum task duration and was terminated.'),
+      this.timing.totalTimeoutMs
+    )
     try {
       const client = await this.client(security.hookCommand)
       const thread = client.startThread(this.threadOptions('workspace-write', choice.tier))
       const { events } = await thread.runStreamed(
         policyBlock + contextBlock + planBlock + secretBoundary + task,
-        { signal: this.aborter.signal }
+        { signal: controller.signal }
       )
       for await (const event of events) {
+        resetIdleTimer()
         if (event.type === 'item.started' || event.type === 'item.updated') {
           if (seenTools.has(event.item.id)) continue
           if (event.item.type === 'command_execution') {
@@ -326,23 +396,31 @@ export class CodexAgentRunner {
               toolInput: event.item.changes.map((change) => `${change.kind}: ${change.path}`).join(', ')
             })
           } else if (event.item.type === 'error') {
-            onEvent({ type: 'error', error: this.broker.scrub(event.item.message) })
+            emitError(event.item.message)
             return
           }
         } else if (event.type === 'turn.failed') {
-          onEvent({ type: 'error', error: this.broker.scrub(event.error.message) })
+          emitError(event.error.message)
           return
         } else if (event.type === 'error') {
-          onEvent({ type: 'error', error: this.broker.scrub(event.message) })
+          emitError(event.message)
           return
         } else if (event.type === 'turn.completed') {
-          onEvent({ type: 'done' })
+          emitDone()
         }
       }
     } catch (error: any) {
-      if (error?.name === 'AbortError') onEvent({ type: 'done' })
-      else onEvent({ type: 'error', error: this.broker.scrub(String(error?.message ?? error)) })
+      if (timedOut) {
+        // abortForTimeout() already emitted the error — the abort itself
+        // throws AbortError here, nothing more to report.
+      } else if (error?.name === 'AbortError') {
+        emitDone()
+      } else {
+        emitError(String(error?.message ?? error))
+      }
     } finally {
+      if (idleTimer) clearTimeout(idleTimer)
+      clearTimeout(totalTimer)
       this.aborter = null
       security.cleanup()
     }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '@anthropic-ai/claude-agent-sdk'
 import { AgentRunner, type ClaudeQuery } from '../src/main/agentRunner'
 import type { KnowledgeEngine } from '../src/main/knowledge/engine'
 import { SecretBroker } from '../src/main/secretBroker'
@@ -84,7 +85,7 @@ describe('AgentRunner Claude security boundary', () => {
     await runner.runTask('inspect safely', (event) => events.push(event))
 
     expect(captured.options.allowedTools).toBeUndefined()
-    expect(captured.options.tools).toEqual(['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'])
+    expect(captured.options.tools).toEqual(['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', 'Skill'])
     expect(deniedOutput).toMatchObject({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
@@ -130,8 +131,39 @@ describe('AgentRunner Claude security boundary', () => {
     })
     expect(captured.options.tools).toEqual([])
     expect(captured.options.allowedTools).toBeUndefined()
-    expect(captured.prompt).toContain('.noli/disabled is present')
-    expect(captured.prompt).toContain('Do not invoke noli')
+    // Policy text is cache-eligible now — it rides in systemPrompt (ahead of
+    // the SYSTEM_PROMPT_DYNAMIC_BOUNDARY marker), not the per-call prompt.
+    expect(captured.options.systemPrompt[0]).toContain('.noli/disabled is present')
+    expect(captured.options.systemPrompt[0]).toContain('Do not invoke noli')
+    expect(captured.options.systemPrompt[1]).toBe(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    expect(captured.prompt).not.toContain('.noli/disabled')
+  })
+
+  it('runTask() also routes retrieved context through the cacheable system prompt', async () => {
+    const pack: ContextPack = {
+      task: 'add a widget',
+      context: '# Context\nSome retrieved rule.',
+      sources: [],
+      tokenEstimate: 8,
+      documents: [{ id: 'rules/widget', title: 'Widget Rule', type: 'Business Rule' }]
+    }
+    const withKnowledge = { retrieve: vi.fn(async () => pack) } as unknown as KnowledgeEngine
+    let captured: any
+    const queryClient = ((args: any) => {
+      captured = args
+      async function* session(): AsyncGenerator<any> {
+        yield { type: 'result' }
+      }
+      return session()
+    }) as unknown as ClaudeQuery
+    const runner = new AgentRunner(root, new SecretBroker(root), withKnowledge, queryClient)
+
+    await runner.runTask('add a widget', () => {})
+
+    expect(captured.options.systemPrompt[0]).toContain('<project-knowledge>')
+    expect(captured.options.systemPrompt[0]).toContain('Some retrieved rule.')
+    expect(captured.options.systemPrompt[1]).toBe(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    expect(captured.prompt).not.toContain('project-knowledge')
   })
 
   it('plan model follows the difficulty scorer, same as execution', async () => {

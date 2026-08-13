@@ -19,7 +19,14 @@ const pack: ContextPack = {
   tokenEstimate: 8
 }
 
-function harness(streamEvents: ThreadEvent[] = []) {
+function harness(
+  streamEvents: ThreadEvent[] = [],
+  overrides: {
+    run?: (input: string, options?: any) => Promise<{ finalResponse: string }>
+    runStreamed?: (input: string, options?: any) => Promise<{ events: AsyncGenerator<ThreadEvent> }>
+    timing?: { planTimeoutMs?: number; idleTimeoutMs?: number; totalTimeoutMs?: number }
+  } = {}
+) {
   const threadOptions: ThreadOptions[] = []
   const prompts: string[] = []
   const knowledge = {
@@ -33,23 +40,27 @@ function harness(streamEvents: ThreadEvent[] = []) {
     startThread: (options) => {
       threadOptions.push(options ?? {})
       return {
-        run: async (input) => {
-          prompts.push(input)
-          return { finalResponse: '1. Inspect code\n2. Make change\n3. Run tests' }
-        },
-        runStreamed: async (input) => {
-          prompts.push(input)
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            for (const event of streamEvents) yield event
-          }
-          return { events: events() }
-        }
+        run:
+          overrides.run ??
+          (async (input) => {
+            prompts.push(input)
+            return { finalResponse: '1. Inspect code\n2. Make change\n3. Run tests' }
+          }),
+        runStreamed:
+          overrides.runStreamed ??
+          (async (input) => {
+            prompts.push(input)
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              for (const event of streamEvents) yield event
+            }
+            return { events: events() }
+          })
       }
     }
   }
   const factory = vi.fn<CodexClientFactory>(() => client)
   return {
-    runner: new CodexAgentRunner('/workspace', broker, knowledge, factory),
+    runner: new CodexAgentRunner('/workspace', broker, knowledge, factory, overrides.timing),
     knowledge,
     factory,
     threadOptions,
@@ -151,6 +162,92 @@ describe('CodexAgentRunner', () => {
       pinned: true
     })
     expect(state.runner.invalidateContext()).toBe(true)
+  })
+
+  /** Real codex-sdk ties `signal` to stream/request cancellation — the SDK's
+   *  own reason for exposing it on TurnOptions. These mocks model that:
+   *  they hang until aborted, then reject like a real cancelled call would.
+   *  Real (short) timers, not fake ones — projectPolicyPrompt() does real
+   *  fs I/O ahead of the timeout timer, which doesn't interleave cleanly
+   *  with vi.advanceTimersByTimeAsync(). */
+  function abortRejects(signal?: AbortSignal): Promise<never> {
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => {
+        const err: Error & { name: string } = Object.assign(new Error('Aborted'), {
+          name: 'AbortError'
+        })
+        reject(err)
+      })
+    })
+  }
+
+  it('times out a plan() call that never resolves — no native SDK cap exists', async () => {
+    const state = harness([], {
+      run: (_input, options) => abortRejects(options?.signal),
+      timing: { planTimeoutMs: 30 }
+    })
+    await expect(state.runner.plan('secure task')).rejects.toThrow(
+      'Codex planning timed out before it completed.'
+    )
+  })
+
+  it('terminates runTask() when the model stops making progress (idle timeout)', async () => {
+    const state = harness([], {
+      runStreamed: async (_input, options) => {
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          yield {
+            type: 'item.started',
+            item: {
+              id: 'command-1',
+              type: 'command_execution',
+              command: 'npm test',
+              aggregated_output: '',
+              status: 'in_progress'
+            }
+          }
+          await abortRejects(options?.signal) // then hangs — never yields turn.completed
+        }
+        return { events: events() }
+      },
+      timing: { idleTimeoutMs: 30, totalTimeoutMs: 60_000 }
+    })
+    const events: any[] = []
+    await state.runner.runTask('secure task', (event) => events.push(event))
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      error: 'Codex stopped making progress and was terminated.'
+    })
+  })
+
+  it('terminates runTask() at the total duration cap even while events keep arriving', async () => {
+    const state = harness([], {
+      runStreamed: async (_input, options) => {
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          // Keeps "making progress" (resets idle) but never finishes — only
+          // the total-duration cap should end this one.
+          for (let i = 0; i < 1000; i++) {
+            const tickOrAbort = await Promise.race([
+              new Promise<'tick'>((resolve) => setTimeout(() => resolve('tick'), 10)),
+              abortRejects(options?.signal)
+            ])
+            if (tickOrAbort === 'tick') {
+              yield {
+                type: 'item.completed',
+                item: { id: `message-${i}`, type: 'agent_message', text: 'still working' }
+              }
+            }
+          }
+        }
+        return { events: events() }
+      },
+      timing: { idleTimeoutMs: 60_000, totalTimeoutMs: 45 }
+    })
+    const events: any[] = []
+    await state.runner.runTask('secure task', (event) => events.push(event))
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      error: 'Codex exceeded the maximum task duration and was terminated.'
+    })
   })
 })
 
