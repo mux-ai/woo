@@ -5,6 +5,9 @@ Knowledge-first desktop IDE. Electron + TypeScript + React + Monaco.
 
 <img width="2998" height="1928" alt="image" src="https://github.com/user-attachments/assets/3dbc865d-e996-4cea-8436-55c9cb385fe9" />
 
+<img width="2998" height="1928" alt="image" src="https://github.com/user-attachments/assets/0fe3766f-d905-4255-bd84-1deede5fb554" />
+
+
 
 
 Three ideas:
