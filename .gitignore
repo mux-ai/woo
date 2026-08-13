@@ -1,0 +1,20 @@
+# Dependencies and generated output
+node_modules/
+out/
+release/
+coverage/
+test-results/
+playwright-report/
+trial-results/
+*.tsbuildinfo
+*.log
+
+# Developer-local and secret-bearing files
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.woo/backups/
+.woo/recovery/
+.woo/vault.enc
+.DS_Store

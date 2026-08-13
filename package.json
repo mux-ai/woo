@@ -1,0 +1,76 @@
+{
+  "name": "woo-studio",
+  "version": "0.1.0",
+  "description": "Knowledge-first desktop IDE with agent panel, native project knowledge engine, and secret-brokered file access",
+  "main": "out/main/index.js",
+  "private": true,
+  "productName": "Woo Studio",
+  "desktopName": "Woo Studio",
+  "author": "Woo Studio contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
+  "files": [
+    "bin/woo.js",
+    "out/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "dist": "npm run build && node scripts/package-desktop.mjs",
+    "dist:dir": "npm run build && node scripts/package-desktop.mjs --dir",
+    "dist:linux": "npm run build && node scripts/package-desktop.mjs --linux AppImage",
+    "dist:mac": "npm run build && node scripts/package-desktop.mjs --mac dmg zip",
+    "dist:win": "npm run build && node scripts/package-desktop.mjs --win nsis",
+    "test": "vitest run",
+    "package:check": "node scripts/verify-package.mjs",
+    "native:rebuild": "node scripts/rebuild-node-pty.mjs",
+    "native:check": "node scripts/check-node-pty.mjs",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs",
+    "release:metadata": "node scripts/release-metadata.mjs",
+    "icon:generate": "node scripts/generate-icon.mjs",
+    "verify": "npm run typecheck && npm run native:check && npm test && npm run build && npm run package:check",
+    "postinstall": "npm run native:rebuild",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.226",
+    "@openai/codex-sdk": "^0.147.0",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@monaco-editor/react": "^4.6.0",
+    "@opencode-ai/sdk": "^1.18.15",
+    "@tanstack/react-query": "^5.101.4",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^5.2.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "axe-core": "4.13.0",
+    "chokidar": "^5.0.0",
+    "electron": "39.8.10",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^29.1.1",
+    "monaco-editor": "^0.52.0",
+    "node-gyp": "12.4.0",
+    "playwright": "1.62.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
+  },
+  "bin": {
+    "woo": "bin/woo.js"
+  }
+}

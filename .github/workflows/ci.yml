@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-smoke:
+    name: ${{ matrix.os }} verify and packaged smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.21.1'
+          cache: npm
+
+      - name: Install locked dependencies and native module
+        run: npm ci
+
+      - name: Verify source, tests, build, and package boundary
+        run: npm run verify
+
+      - name: Build unpacked desktop application
+        run: npm run dist:dir
+
+      - name: Smoke packaged application (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run smoke:packaged
+
+      - name: Smoke packaged application
+        if: runner.os != 'Linux'
+        run: npm run smoke:packaged
+
+      - name: Upload smoke diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-diagnostics-${{ matrix.os }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,102 @@
+name: Signed desktop release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.21.1'
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+
+  package:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            command: npm run dist:linux
+          - os: macos-latest
+            platform: macos
+            command: npm run dist:mac
+          - os: windows-latest
+            platform: windows
+            command: npm run dist:win
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      WOO_REQUIRE_SIGNING: ${{ runner.os == 'Linux' && '0' || '1' }}
+      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.21.1'
+          cache: npm
+
+      - run: npm ci
+      - name: Build platform installer with required signing
+        run: ${{ matrix.command }}
+
+      - name: Generate CycloneDX SBOM and SHA-256 checksums
+        run: npm run release:metadata -- --platform=${{ matrix.platform }}
+
+      - name: Attest release provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: release/Woo-Studio-*
+
+      - name: Attest release SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: release/Woo-Studio-*
+          sbom-path: release/Woo-Studio-${{ matrix.platform }}.sbom.cdx.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: woo-studio-${{ matrix.platform }}
+          path: |
+            release/Woo-Studio-*
+            release/SHA256SUMS-*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+      - name: Create immutable release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/*/* --generate-notes --verify-tag

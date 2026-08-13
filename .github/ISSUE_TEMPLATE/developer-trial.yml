@@ -1,0 +1,35 @@
+name: Developer trial findings
+description: Record anonymized, aggregated friction from the external trial protocol.
+title: "trial: "
+labels: ["usability", "developer-experience"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include participant identity, credentials, provider output, or workspace content.
+  - type: input
+    id: participants
+    attributes:
+      label: Participant count
+      placeholder: "3"
+    validations:
+      required: true
+  - type: textarea
+    id: thresholds
+    attributes:
+      label: Acceptance-threshold results
+      description: List aggregate pass/fail results and median timings.
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: Recurring friction
+      description: Describe observations seen in at least two sessions.
+    validations:
+      required: true
+  - type: textarea
+    id: actions
+    attributes:
+      label: Proposed product changes
+    validations:
+      required: true

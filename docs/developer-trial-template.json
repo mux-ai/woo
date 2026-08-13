@@ -1,0 +1,22 @@
+{
+  "participantId": "P01",
+  "environment": {
+    "os": "",
+    "nodeVersion": "",
+    "provider": "claude-or-codex"
+  },
+  "minutes": {
+    "developmentWindow": 0,
+    "setupReady": 0,
+    "firstGroundedTask": 0,
+    "total": 0
+  },
+  "completedWithoutHelp": {
+    "secretDenial": false,
+    "recovery": false,
+    "packagedSmoke": false
+  },
+  "confidenceOutOfFive": 0,
+  "blockers": [],
+  "observations": []
+}
