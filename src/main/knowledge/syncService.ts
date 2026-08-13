@@ -31,7 +31,19 @@ const SYNC_END = '<!-- woo-sync:end -->'
 
 export type WorkspaceSnapshot = Map<string, string>
 
-interface PendingProposal extends KnowledgeSyncProposal {
+export interface PendingProposal extends KnowledgeSyncProposal {
+  originalContent: string
+  proposedContent: string
+}
+
+/** Everything a proposal needs before it gets a review-scoped id. */
+export interface ProposalDraft {
+  documentId: string
+  documentTitle: string
+  path: string
+  reason: string
+  diff: string
+  tokenDeltaEstimate: number
   originalContent: string
   proposedContent: string
 }
@@ -271,5 +283,23 @@ export class KnowledgeSyncService {
 
   dismiss(reviewId: string): void {
     this.pending.delete(reviewId)
+  }
+
+  /**
+   * Register a review whose proposals were produced elsewhere (e.g. the
+   * manual-edit AI sync) so apply()/dismiss() serve it like any other.
+   */
+  registerReview(task: string, changedFiles: string[], drafts: ProposalDraft[]): KnowledgeSyncReview {
+    const internal = new Map<string, PendingProposal>()
+    for (const draft of drafts) {
+      const id = randomUUID()
+      internal.set(id, { ...draft, id })
+    }
+    const reviewId = randomUUID()
+    this.pending.set(reviewId, { proposals: internal })
+    const proposals = [...internal.values()].map(
+      ({ originalContent: _original, proposedContent: _proposed, ...proposal }) => proposal
+    )
+    return { id: reviewId, task, changedFiles, proposals }
   }
 }

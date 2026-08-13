@@ -355,13 +355,19 @@ export function EditorArea({
   const [readyLanguages, setReadyLanguages] = useState<Record<string, boolean>>({})
   useEffect(() => {
     let cancelled = false
-    void ensureMonacoLanguage(activeLanguage).then(() => {
-      registerKnowledgeCompletion(activeLanguage)
-      registerInlineCompletion(activeLanguage)
+    const markReady = (): void => {
       if (!cancelled) {
         setReadyLanguages((prev) => (prev[activeLanguage] ? prev : { ...prev, [activeLanguage]: true }))
       }
-    })
+    }
+    ensureMonacoLanguage(activeLanguage).then(() => {
+      registerKnowledgeCompletion(activeLanguage)
+      registerInlineCompletion(activeLanguage)
+      markReady()
+    }, markReady)
+    // ^ registration failure must still mount the editor: a plaintext-looking
+    // buffer beats a permanently blank pane with no cursor (dev-server module
+    // reloads can reject a language import once and never again).
     return () => { cancelled = true }
   }, [activeLanguage])
 

@@ -18,6 +18,7 @@ import { VaultService } from './vaultService'
 import { KnowledgeSyncService } from './knowledge/syncService'
 import { KnowledgeCompletionService } from './knowledge/completionService'
 import { InlineCompletionService } from './inlineCompletionService'
+import { ManualKnowledgeSync } from './knowledge/manualSyncService'
 import { SourceGraphService } from './sourceGraphService'
 import { chooseAccount } from './modelRouter'
 import { EditorRecoveryService, WorkspaceBackupService } from './backupService'
@@ -74,6 +75,14 @@ export function registerIpc(
   let agents = makeAgents(workspaceRoot, broker, knowledge)
   let inlineCompletion = new InlineCompletionService(workspaceRoot, broker, knowledge)
   let knowledgeSync = new KnowledgeSyncService(workspaceRoot, knowledge)
+  // Manual-edit AI sync: reviews arrive through the same agent-event channel
+  // and the same apply/dismiss handlers as agent-task sync reviews.
+  const notifyManualSync = (review: import('../shared/types').KnowledgeSyncReview): void => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('agent:event', { type: 'knowledge-sync', sync: review })
+    }
+  }
+  let manualSync = new ManualKnowledgeSync(workspaceRoot, broker, knowledge, knowledgeSync, notifyManualSync)
   let sourceGraph = new SourceGraphService(workspaceRoot)
   let rules = new RuleChecker(knowledge)
   let git = new GitService(workspaceRoot)
@@ -179,6 +188,8 @@ export function registerIpc(
     agents = nextAgents
     inlineCompletion = new InlineCompletionService(nextRoot, nextBroker, nextKnowledge)
     knowledgeSync = nextKnowledgeSync
+    manualSync.stop()
+    manualSync = new ManualKnowledgeSync(nextRoot, nextBroker, nextKnowledge, nextKnowledgeSync, notifyManualSync)
     sourceGraph = nextSourceGraph
     rules = nextRules
     git = nextGit
@@ -332,9 +343,13 @@ export function registerIpc(
     files.list(dir == null ? '' : assertString(dir, 'dir'))
   )
   handle('files:read', (_e, p) => files.readFile(assertString(p, 'path')))
-  handle('files:write', (_e, p, content) =>
-    files.writeFile(assertString(p, 'path'), assertString(content, 'content'))
-  )
+  handle('files:write', async (_e, p, content) => {
+    const path = assertString(p, 'path')
+    await files.writeFile(path, assertString(content, 'content'))
+    // Manual save: queue for the debounced AI knowledge review. Agent edits
+    // never pass through this channel (the SDK writes to disk directly).
+    manualSync.noteSaved(path)
+  })
 
   handle('files:create', (_e, p) => files.createFile(assertString(p, 'path')))
   handle('files:mkdir', (_e, p) => files.createDir(assertString(p, 'path')))
