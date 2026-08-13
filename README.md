@@ -64,8 +64,8 @@ confirms unsaved edits, disposes project-bound agents, watchers, and terminal
 state, then refreshes the workbench without relaunching Electron.
 
 On the first launch, the **Setup** activity checks the runtime, native terminal,
-workspace access, project knowledge, and supported provider CLIs. The editor
-remains usable while optional provider checks are incomplete.
+workspace access, project knowledge, and the agent account. The editor remains
+usable while the optional account check is incomplete.
 
 ### 2. Initialize project knowledge
 
@@ -77,21 +77,23 @@ possible; every relevant agent task retrieves these documents before it runs.
 
 ### 3. Connect an agent
 
-Expand **Accounts**, connect an installed CLI, and select **Use**. Woo reuses
-the CLI's existing credential store; it does not copy credentials into the
-renderer or its own settings. Disconnecting a provider in Woo does not sign the
-CLI out.
+Expand **Accounts** and select **Connect**. Woo reuses the provider's existing
+credential store; it does not copy credentials into the renderer or its own
+settings. Disconnecting a provider in Woo does not sign the provider out.
+
+Claude and Codex ship their CLI binaries with Woo's npm SDK dependencies, so
+they connect without a separate CLI install: **Connect** launches the
+provider's own browser sign-in, and credentials stay in that provider's store.
 
 | Provider | Status in Woo | Setup |
 | --- | --- | --- |
-| Claude | Supported; path denial, sanitized environment, and pre/post-tool secret hooks | [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started), run `claude`, and complete its sign-in flow |
-| Codex | Supported; workspace sandbox, path denial, sanitized environment, and pre/post-tool secret hooks | [Install and sign in to Codex CLI](https://learn.chatgpt.com/docs/codex/cli) |
-| OpenCode | **Experimental**; see the reduced guarantee below | [Install OpenCode](https://opencode.ai/docs/) and run `opencode auth login` |
+| Claude | Supported; path denial, sanitized environment, and pre/post-tool secret hooks | Bundled — select **Connect** and complete the browser sign-in |
+| Codex | Supported; workspace sandbox, path denial, sanitized environment, and pre/post-tool secret hooks | Bundled — select **Connect** and complete the browser sign-in |
+| OpenCode | **Experimental**; see the reduced guarantee below | Requires the CLI — [install OpenCode](https://opencode.ai/docs/), run `opencode auth login`, then **Connect** |
+| OpenCode Go | **Experimental**; open-weights models (deepseek/kimi/qwen/glm/minimax) | Second credential set under the same `opencode` CLI |
 
-OpenCode is disabled by default. Developers must launch Woo with
-`WOO_ENABLE_EXPERIMENTAL_OPENCODE=1` to make the provider available. OpenCode
-does not expose a post-tool hook that can scrub output before it enters
-OpenCode's own transcript. Woo compensates with path denial, a sanitized
+OpenCode does not expose a post-tool hook that can scrub output before it
+enters OpenCode's own transcript. Woo compensates with path denial, a sanitized
 environment, disabled web fetch, default-deny permissions, and renderer-output
 scrubbing, but it cannot provide the same transcript-level guarantee as Claude
 or Codex. Woo shows this warning whenever OpenCode is selected.
@@ -103,7 +105,7 @@ or Codex. Woo shows this warning whenever OpenCode is selected.
 2. Enter `Explain the payment security rules and propose a safe fix` in the
    Agent panel.
 3. Review the proposed plan and the planning/execution knowledge-token estimate.
-4. Open the Context Pack to verify the source documents, then approve **Run**.
+4. Open the Context Pack to verify the source documents, then approve **Run Plan**.
 5. After files change, review the **Sync Knowledge** proposal and apply only the
    updates that remain true for the project.
 6. As a boundary check, ask the agent to read `.env`. The Secret Broker should
@@ -188,10 +190,10 @@ requirements are covered in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 Woo maintains bounded local workspace backups before agent execution and
 checkpoints unsaved editor buffers in a private per-workspace directory under
-Electron's local application data, outside the repository. After an interrupted session it offers to
-restore those buffers; **Restore latest workspace backup** is also available
-from the command palette. See [`docs/DEVELOPER_TRIAL.md`](docs/DEVELOPER_TRIAL.md)
-for the external usability-validation protocol.
+Electron's local application data, outside the repository. After an interrupted
+session it offers to restore those buffers on the next launch. See
+[`docs/DEVELOPER_TRIAL.md`](docs/DEVELOPER_TRIAL.md) for the external
+usability-validation protocol.
 
 Data flows, retention, deletion controls, and residual provider risks are documented
 in [`PRIVACY.md`](PRIVACY.md); vulnerability reporting and supported security
@@ -240,11 +242,12 @@ npm run verify
 - **Packaging cannot download Electron headers:** confirm access to
   `electronjs.org` and GitHub, then rerun the same `npm run dist:*` command.
   Failed temporary staging directories are printed and retained for diagnosis.
-- **A provider says “CLI not installed”:** verify `claude`, `codex`, or
-  `opencode` works in the same shell that launches Woo, then restart Woo.
+- **A provider says “CLI not installed”:** Claude and Codex ship their CLI
+  binaries with Woo, so this normally only affects OpenCode. Verify `opencode`
+  works in the same shell that launches Woo, then restart Woo.
 - **Sign-in opens but Woo stays disconnected:** complete sign-in in the
-  provider CLI once, reopen Accounts, and reconnect. Woo intentionally stores
-  only its connected/disconnected preference.
+  provider's own flow once, reopen Accounts, and select **Connect** again. Woo
+  intentionally stores only its connected/disconnected preference.
 - **A blank window appears after a workspace switch:** close Woo and run
   `npm run build`, then `npm run dev` again. Production builds display a visible
   renderer-load diagnostic when no fallback bundle is available.
@@ -282,10 +285,11 @@ One file per concept, anywhere under `.woo/knowledge/`:
 title: PAY-RETRY-002 Declined Payments Never Retry
 type: rule            # rule | entity | component | workflow | decision
 description: Declined payments must never be automatically retried.
+aliases: [declined payment retry]  # optional — synonyms weighted like the title
 relationships:
   - predicate: applies-to        # applies-to | depends-on | enforced-by | uses | follows
     to: Payment Worker           # another doc's title or id
-checks:               # optional — makes the rule machine-checkable
+checks:               # optional, rules only — machine-checkable
   - pattern: 'Result\.retry\(\)'
     severity: warning
     message: Declined payment branch must not retry.
