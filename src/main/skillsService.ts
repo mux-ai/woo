@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { homedir } from 'os'
-import { basename, join, relative, sep } from 'path'
+import { basename, isAbsolute, join, relative, sep } from 'path'
 import { splitFrontmatter } from './knowledge/loader'
 import type { SkillProvider, SkillInfo, SkillInstallTarget, SkillScope } from '../shared/types'
 
@@ -79,7 +79,7 @@ export class SkillsService {
     for (const provider of ['claude', 'codex'] as SkillProvider[]) {
       for (const scope of ['account', 'project'] as SkillScope[]) {
         const dir = this.skillsDirAbs(provider, scope)
-        const abs = skillMdPath.startsWith('/')
+        const abs = isAbsolute(skillMdPath)
           ? skillMdPath
           : join(this.workspaceRoot, skillMdPath)
         const rel = relative(dir, abs).split(sep).join('/')

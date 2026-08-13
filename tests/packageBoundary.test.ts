@@ -21,7 +21,8 @@ describe('npm package boundary', () => {
       "mkdtempSync(join(tmpdir(), 'woo-package-'))"
     )
 
-    const ignored = readFileSync('.gitignore', 'utf8').split('\n')
+    // \r?\n: Windows CI checks out with CRLF line endings.
+    const ignored = readFileSync('.gitignore', 'utf8').split(/\r?\n/)
     expect(ignored).toEqual(expect.arrayContaining([
       '.env',
       '.env.*',

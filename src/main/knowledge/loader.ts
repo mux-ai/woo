@@ -81,6 +81,9 @@ async function listMarkdownFiles(dir: string): Promise<string[]> {
 }
 
 export function splitFrontmatter(raw: string): { meta: any; body: string } | null {
+  // Windows checkouts read these files with CRLF endings; without this the
+  // YAML values keep a trailing \r and every graph-edge lookup misses.
+  raw = raw.replace(/\r\n/g, '\n')
   if (!raw.startsWith('---')) return null
   const end = raw.indexOf('\n---', 3)
   if (end === -1) return null

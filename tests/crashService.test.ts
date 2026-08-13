@@ -20,8 +20,11 @@ describe('CrashService', () => {
       expect(raw).not.toContain('hunter2hunter2')
       expect(raw).not.toContain(workspace)
       expect(raw).toContain('<workspace>')
-      expect(statSync(path!).mode & 0o777).toBe(0o600)
-      expect(statSync(service.directory()).mode & 0o777).toBe(0o700)
+      // NTFS has no POSIX permission bits — mode asserts only hold on Unix.
+      if (process.platform !== 'win32') {
+        expect(statSync(path!).mode & 0o777).toBe(0o600)
+        expect(statSync(service.directory()).mode & 0o777).toBe(0o700)
+      }
     } finally {
       rmSync(userData, { recursive: true, force: true })
     }

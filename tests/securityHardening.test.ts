@@ -36,7 +36,10 @@ describe('production data-protection boundaries', () => {
       const second = workspaceDataRoot(userData, '/projects/private-name')
       expect(first).toBe(second)
       expect(first).not.toContain('private-name')
-      expect(statSync(first).mode & 0o777).toBe(0o700)
+      // NTFS has no POSIX permission bits — mode asserts only hold on Unix.
+      if (process.platform !== 'win32') {
+        expect(statSync(first).mode & 0o777).toBe(0o700)
+      }
     } finally {
       rmSync(userData, { recursive: true, force: true })
     }

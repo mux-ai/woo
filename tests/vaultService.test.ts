@@ -34,8 +34,10 @@ describe('VaultService crypto', () => {
   it('vault file is 0600 and contains no plaintext', async () => {
     await vault.create('correct horse battery')
     await vault.set('API_KEY', 'sk_live_plaintext_check')
-    const mode = statSync(vaultFile()).mode & 0o777
-    expect(mode).toBe(0o600)
+    // NTFS has no POSIX permission bits — mode asserts only hold on Unix.
+    if (process.platform !== 'win32') {
+      expect(statSync(vaultFile()).mode & 0o777).toBe(0o600)
+    }
     const raw = readFileSync(vaultFile(), 'utf8')
     expect(raw).not.toContain('sk_live_plaintext_check')
     expect(raw).not.toContain('API_KEY')

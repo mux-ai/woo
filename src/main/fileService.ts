@@ -121,7 +121,9 @@ export class FileService {
     const files: string[] = []
     const directories: string[] = []
     for (const entry of entries) {
-      const childRel = dir ? join(dir, entry.name) : entry.name
+      // Workspace-relative paths use '/' on every platform — they flow to
+      // the renderer, search results, and tests; join() would leak '\' in.
+      const childRel = dir ? `${dir}/${entry.name}` : entry.name
       if (entry.isDirectory()) {
         if (!IGNORED_DIRS.has(entry.name)) directories.push(childRel)
       } else {

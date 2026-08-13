@@ -51,11 +51,14 @@ describe('workspace recovery', () => {
       await recovery.save([{ path: 'app.ts', content: 'private unsaved source' }])
 
       expect(existsSync(join(root, '.woo/backups'))).toBe(false)
-      expect(statSync(join(storage, 'backups', backup.id)).mode & 0o777).toBe(0o700)
-      expect(
-        statSync(join(storage, 'backups', backup.id, 'files', 'app.ts')).mode & 0o777
-      ).toBe(0o600)
-      expect(statSync(join(storage, 'recovery', 'unsaved.json')).mode & 0o777).toBe(0o600)
+      // NTFS has no POSIX permission bits — mode asserts only hold on Unix.
+      if (process.platform !== 'win32') {
+        expect(statSync(join(storage, 'backups', backup.id)).mode & 0o777).toBe(0o700)
+        expect(
+          statSync(join(storage, 'backups', backup.id, 'files', 'app.ts')).mode & 0o777
+        ).toBe(0o600)
+        expect(statSync(join(storage, 'recovery', 'unsaved.json')).mode & 0o777).toBe(0o600)
+      }
 
       await backups.clear()
       await recovery.clear()

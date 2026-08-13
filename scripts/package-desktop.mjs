@@ -190,7 +190,11 @@ try {
     // Each target is generated and ignored. Replace it instead of merging so
     // removed runtime files cannot survive from an older package.
     rmSync(destination, { recursive: true, force: true })
-    cpSync(source, destination, { recursive: true, force: true })
+    // verbatimSymlinks: macOS .app bundles are built from relative framework
+    // symlinks; without it cpSync rewrites them to absolute paths inside the
+    // staging directory, which is deleted right after — leaving the packaged
+    // app with dangling links (dyld: "Electron Framework ... no such file").
+    cpSync(source, destination, { recursive: true, force: true, verbatimSymlinks: true })
   }
   succeeded = true
   console.log(`Desktop artifacts written to ${releaseDir}`)
