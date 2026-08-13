@@ -1,6 +1,11 @@
 # Woo Studio
 
 Knowledge-first desktop IDE. Electron + TypeScript + React + Monaco.
+<img width="2998" height="1928" alt="image" src="https://github.com/user-attachments/assets/7f533233-f1bd-4d05-9b28-89be7b5dbab1" />
+
+<img width="2998" height="1928" alt="image" src="https://github.com/user-attachments/assets/3dbc865d-e996-4cea-8436-55c9cb385fe9" />
+
+
 
 Three ideas:
 
