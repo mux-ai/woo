@@ -31,14 +31,27 @@ function knowledgeWith(context: string, documentCount = 0): KnowledgeEngine {
   } as unknown as KnowledgeEngine
 }
 
-function textSession(text: string, onArgs?: (args: any) => void) {
+/**
+ * Fake persistent streaming session: one query() call whose prompt is the
+ * push queue; every user message produces one assistant + result pair.
+ */
+function streamingSession(
+  replyFor: (userText: string) => string | Promise<string>,
+  captured: { args?: any; userTexts: string[]; sessions: number }
+) {
   return ((args: any) => {
-    onArgs?.(args)
-    async function* session(): AsyncGenerator<any> {
-      yield { type: 'assistant', message: { content: [{ type: 'text', text }] } }
-      yield { type: 'result' }
+    captured.args = args
+    captured.sessions += 1
+    async function* stream(): AsyncGenerator<any> {
+      for await (const userMessage of args.prompt) {
+        const userText = String(userMessage.message.content)
+        captured.userTexts.push(userText)
+        const text = await replyFor(userText)
+        yield { type: 'assistant', message: { content: [{ type: 'text', text }] } }
+        yield { type: 'result' }
+      }
     }
-    return session()
+    return stream()
   }) as any
 }
 
@@ -51,22 +64,38 @@ const request = (overrides: Partial<InlineCompletionRequest> = {}): InlineComple
   ...overrides
 })
 
-describe('InlineCompletionService', () => {
-  it('grounds the cacheable system prompt in retrieved project knowledge', async () => {
-    let captured: any
+describe('InlineCompletionService (persistent session)', () => {
+  it('grounds each request in retrieved knowledge and keeps session options tight', async () => {
+    const captured = { args: undefined as any, userTexts: [] as string[], sessions: 0 }
     const service = new InlineCompletionService(
       root,
       new SecretBroker(root),
       knowledgeWith('RULE: totals are integers in cents', 2),
-      textSession('price * quantity', (args) => { captured = args })
+      streamingSession(() => 'price * quantity', captured)
     )
     const result = await service.complete(request())
     expect(result).toBe('price * quantity')
-    expect(captured.options.systemPrompt[0]).toContain('RULE: totals are integers in cents')
-    expect(captured.options.tools).toEqual([])
-    expect(captured.options.maxTurns).toBe(1)
-    expect(captured.options.settingSources).toEqual([])
-    expect(captured.prompt).toContain('const total = <CURSOR>')
+    expect(captured.args.options.tools).toEqual([])
+    expect(captured.args.options.settingSources).toEqual([])
+    expect(captured.args.options.systemPrompt[0]).toContain('inline code completion engine')
+    expect(captured.userTexts[0]).toContain('RULE: totals are integers in cents')
+    expect(captured.userTexts[0]).toContain('const total = <CURSOR>')
+    service.stop()
+  })
+
+  it('reuses ONE session across requests and recycles it after the turn budget', async () => {
+    const captured = { args: undefined as any, userTexts: [] as string[], sessions: 0 }
+    const service = new InlineCompletionService(
+      root,
+      new SecretBroker(root),
+      knowledgeWith(''),
+      streamingSession(() => 'x', captured)
+    )
+    for (let i = 0; i < 3; i++) await service.complete(request())
+    expect(captured.sessions).toBe(1)
+    for (let i = 0; i < 20; i++) await service.complete(request())
+    expect(captured.sessions).toBeGreaterThan(1)
+    service.stop()
   })
 
   it('refuses secret-named paths outright', async () => {
@@ -83,56 +112,55 @@ describe('InlineCompletionService', () => {
 
   it('scrubs known secret values from the outbound code context and the reply', async () => {
     writeFileSync(join(root, '.env'), 'TOKEN=hunter2hunter2hunter2\n')
-    let captured: any
+    const captured = { args: undefined as any, userTexts: [] as string[], sessions: 0 }
     const service = new InlineCompletionService(
       root,
       new SecretBroker(root),
       knowledgeWith(''),
-      textSession('use hunter2hunter2hunter2 here', (args) => { captured = args })
+      streamingSession(() => 'use hunter2hunter2hunter2 here', captured)
     )
     const result = await service.complete(
       request({ prefix: 'const token = "hunter2hunter2hunter2"\nconst next = ' })
     )
-    expect(captured.prompt).not.toContain('hunter2hunter2hunter2')
+    expect(captured.userTexts[0]).not.toContain('hunter2hunter2hunter2')
     expect(result).not.toContain('hunter2hunter2hunter2')
+    service.stop()
   })
 
   it('unwraps a fenced reply', async () => {
+    const captured = { args: undefined as any, userTexts: [] as string[], sessions: 0 }
     const service = new InlineCompletionService(
       root,
       new SecretBroker(root),
       knowledgeWith(''),
-      textSession('```ts\nprice * quantity\n```')
+      streamingSession(() => '```ts\nprice * quantity\n```', captured)
     )
     expect(await service.complete(request())).toBe('price * quantity')
+    service.stop()
   })
 
-  it('aborts the previous in-flight request when a new one arrives', async () => {
-    const controllers: AbortSignal[] = []
+  it('a superseded request returns empty and never steals the newer reply', async () => {
+    const captured = { args: undefined as any, userTexts: [] as string[], sessions: 0 }
     let releaseFirst: () => void = () => {}
-    const firstBlocked = new Promise<void>((resolveBlock) => { releaseFirst = resolveBlock })
+    const firstGate = new Promise<void>((resolveGate) => { releaseFirst = resolveGate })
     let call = 0
-    const queryClient = ((args: any) => {
-      const index = ++call
-      controllers.push(args.options.abortController.signal)
-      async function* session(): AsyncGenerator<any> {
-        if (index === 1) await firstBlocked
-        yield { type: 'assistant', message: { content: [{ type: 'text', text: `reply ${index}` }] } }
-        yield { type: 'result' }
-      }
-      return session()
-    }) as any
-    const service = new InlineCompletionService(root, new SecretBroker(root), knowledgeWith(''), queryClient)
-
+    const service = new InlineCompletionService(
+      root,
+      new SecretBroker(root),
+      knowledgeWith(''),
+      streamingSession(async () => {
+        call += 1
+        if (call === 1) { await firstGate; return 'reply 1' }
+        return 'reply 2'
+      }, captured)
+    )
     const first = service.complete(request())
-    // Yield so the first call reaches its (blocked) session before the second starts.
     await new Promise((resolveTick) => setTimeout(resolveTick, 10))
     const second = service.complete(request({ prefix: 'const other = ' }))
     await new Promise((resolveTick) => setTimeout(resolveTick, 10))
     releaseFirst()
-
     expect(await second).toBe('reply 2')
-    expect(controllers[0].aborted).toBe(true)
-    expect(await first).toBe('')
+    expect(await first).toBe('') // superseded: own reply consumed + discarded
+    service.stop()
   })
 })

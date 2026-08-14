@@ -1,3 +1,6 @@
+import { useEffect, useState } from 'react'
+import { onInlineCompletionBusy } from './EditorArea'
+
 export function StatusBar({
   errors,
   warnings,
@@ -13,6 +16,8 @@ export function StatusBar({
   autosave: boolean
   onToggleAutosave: () => void
 }) {
+  const [aiBusy, setAiBusy] = useState(false)
+  useEffect(() => onInlineCompletionBusy(setAiBusy), [])
   return (
     <div className="statusbar">
       <span className={`status-dot ${knowledgeReady ? 'ok' : 'off'}`} />
@@ -21,6 +26,7 @@ export function StatusBar({
         ⊗ {errors} ⚠ {warnings} ⓘ {infos}
       </span>
       <div className="status-spacer" />
+      {aiBusy && <span className="status-ai-busy">✦ AI…</span>}
       <button
         className="status-toggle"
         title="Write dirty buffers to disk after a 2s typing pause (feeds knowledge sync)"

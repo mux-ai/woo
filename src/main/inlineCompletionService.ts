@@ -1,36 +1,85 @@
 import { query, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { InlineCompletionRequest } from '../shared/types'
 import { SecretBroker } from './secretBroker'
 import { KnowledgeEngine } from './knowledge/engine'
 import { projectPolicyPrompt } from './projectPolicy'
 
 /**
- * AI inline (ghost-text) completion — one tool-less model turn per request,
- * grounded in retrieved project knowledge (KNOW-001) and scrubbed on both
- * sides of the wire (SEC-002).
+ * AI inline (ghost-text) completion — grounded in retrieved project
+ * knowledge (KNOW-001) and scrubbed on both sides of the wire (SEC-002).
  *
- * Latency note: each call spawns an SDK CLI subprocess, so suggestions land
- * roughly 1.5-3s after the editor pauses. Single-flight below guarantees a
- * burst of keystrokes never stacks subprocesses — every new request aborts
- * the previous one first.
+ * Uses ONE persistent streaming-input SDK session instead of a subprocess
+ * per request: the first completion pays the spawn cost (~3-6s), later ones
+ * skip straight to the model turn (~1-2s). The session is recycled after
+ * MAX_SESSION_TURNS completions so the growing transcript never bloats
+ * token cost, and torn down + lazily recreated on any error or timeout.
  */
 
 type ClaudeQuery = typeof query
 
-const COMPLETION_TIMEOUT_MS = 8_000
+const COMPLETION_TIMEOUT_MS = 10_000
+const MAX_SESSION_TURNS = 20
 
-/**
- * Same cache trick as agentRunner: policy + knowledge are stable across the
- * keystrokes of an editing session, so they form the cacheable prefix and
- * only the per-request code pays full price.
- */
 function cacheableSystemPrompt(staticBlock: string): string[] | undefined {
   return staticBlock ? [staticBlock, SYSTEM_PROMPT_DYNAMIC_BOUNDARY] : undefined
 }
 
+const SESSION_INSTRUCTIONS =
+  'You are an inline code completion engine. Each user message is an INDEPENDENT completion request — ' +
+  'never refer to earlier requests. Continue the code exactly at <CURSOR>. ' +
+  'Reply with ONLY the raw code continuation (max 6 lines) — no explanations, no markdown fences, ' +
+  'no repetition of existing code. Prefer identifiers, functions, and conventions from any project ' +
+  'knowledge included in the request. If no useful continuation exists, reply with an empty message.'
+
+interface PushQueue {
+  push(message: SDKUserMessage): void
+  end(): void
+  iterable: AsyncIterable<SDKUserMessage>
+}
+
+function makePushQueue(): PushQueue {
+  const buffered: SDKUserMessage[] = []
+  let wake: (() => void) | null = null
+  let ended = false
+  return {
+    push(message) {
+      buffered.push(message)
+      wake?.()
+    },
+    end() {
+      ended = true
+      wake?.()
+    },
+    iterable: {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          while (buffered.length > 0) yield buffered.shift()!
+          if (ended) return
+          await new Promise<void>((resolveWake) => { wake = resolveWake })
+          wake = null
+        }
+      }
+    }
+  }
+}
+
+interface Session {
+  queue: PushQueue
+  stream: ReturnType<ClaudeQuery>
+  turns: number
+  /**
+   * FIFO of reply resolvers. Turns complete strictly in send order, so the
+   * n-th result event always belongs to the n-th queued request — a
+   * superseded request still consumes ITS OWN reply (and discards it),
+   * never a later request's.
+   */
+  waiters: ((text: string) => void)[]
+}
+
 export class InlineCompletionService {
-  private aborter: AbortController | null = null
-  private activeQuery: ReturnType<ClaudeQuery> | null = null
+  private session: Session | null = null
+  private requestSeq = 0
 
   constructor(
     private workspaceRoot: string,
@@ -40,10 +89,16 @@ export class InlineCompletionService {
   ) {}
 
   stop(): void {
-    this.aborter?.abort()
-    ;(this.activeQuery as { close?: () => void } | null)?.close?.()
-    this.aborter = null
-    this.activeQuery = null
+    this.disposeSession()
+  }
+
+  private disposeSession(): void {
+    const session = this.session
+    this.session = null
+    if (!session) return
+    for (const waiter of session.waiters.splice(0)) waiter('')
+    session.queue.end()
+    ;(session.stream as { close?: () => void }).close?.()
   }
 
   /**
@@ -68,13 +123,54 @@ export class InlineCompletionService {
     return env
   }
 
+  private async ensureSession(): Promise<Session> {
+    if (this.session) return this.session
+    const policyBlock = await projectPolicyPrompt(this.workspaceRoot)
+    const queue = makePushQueue()
+    const stream = this.queryClient({
+      prompt: queue.iterable,
+      options: {
+        cwd: this.workspaceRoot,
+        systemPrompt: cacheableSystemPrompt(policyBlock + SESSION_INSTRUCTIONS),
+        permissionMode: 'default',
+        tools: [],
+        maxTurns: MAX_SESSION_TURNS * 2,
+        env: this.buildAgentEnv(),
+        // Operator's ~/.claude files must not steer completions.
+        settingSources: []
+      }
+    })
+    const session: Session = { queue, stream, turns: 0, waiters: [] }
+    this.session = session
+
+    // Single reader loop for the session's whole life: accumulates each
+    // assistant turn and resolves reply waiters strictly in FIFO order.
+    void (async () => {
+      let text = ''
+      try {
+        for await (const message of stream as AsyncIterable<any>) {
+          if (message.type === 'assistant') {
+            for (const block of message.message.content) {
+              if (block.type === 'text') text += block.text
+            }
+          }
+          if (message.type === 'result') {
+            session.waiters.shift()?.(text)
+            text = ''
+          }
+        }
+      } catch {
+        // fall through to cleanup
+      }
+      for (const waiter of session.waiters.splice(0)) waiter('')
+      if (this.session === session) this.session = null
+    })()
+    return session
+  }
+
   async complete(request: InlineCompletionRequest): Promise<string> {
     if (!this.broker.checkPath(request.path).allowed) return ''
-
-    // Cancel the in-flight request — the editor has moved on.
-    this.stop()
-    const controller = new AbortController()
-    this.aborter = controller
+    const seq = ++this.requestSeq
 
     // The code around the cursor is file content: scrub it before it leaves
     // the process, exactly like every other agent-bound text.
@@ -93,65 +189,44 @@ export class InlineCompletionService {
     } catch {
       // no knowledge — complete without it
     }
-    const policyBlock = await projectPolicyPrompt(this.workspaceRoot)
+    if (seq !== this.requestSeq) return '' // superseded while retrieving
 
-    let session: ReturnType<ClaudeQuery> | null = null
-    let timedOut = false
-    const timeout = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-      ;(session as { close?: () => void } | null)?.close?.()
-    }, COMPLETION_TIMEOUT_MS)
-    try {
-      session = this.queryClient({
-        prompt:
-          'You are an inline code completion engine. Continue the code exactly at <CURSOR>. ' +
-          'Reply with ONLY the raw code continuation (max 6 lines) — no explanations, no markdown fences, no repetition of existing code. ' +
-          'Prefer identifiers, functions, and conventions from the project knowledge above when relevant. ' +
-          'If no useful continuation exists, reply with an empty message.\n\n' +
+    const session = await this.ensureSession()
+    if (seq !== this.requestSeq) return ''
+
+    const reply = new Promise<string>((resolveReply) => {
+      session.waiters.push(resolveReply)
+    })
+    session.queue.push({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: {
+        role: 'user',
+        content:
+          contextBlock +
           `File: ${request.path} (${request.language})\n\n` +
-          '<code>\n' +
-          prefix +
-          '<CURSOR>' +
-          suffix +
-          '\n</code>',
-        options: {
-          cwd: this.workspaceRoot,
-          systemPrompt: cacheableSystemPrompt(policyBlock + contextBlock),
-          abortController: controller,
-          permissionMode: 'default',
-          tools: [],
-          maxTurns: 1,
-          env: this.buildAgentEnv(),
-          // Operator's ~/.claude files must not steer completions either.
-          settingSources: []
-        }
-      })
-      this.activeQuery = session
-      let text = ''
-      for await (const message of session) {
-        if (message.type === 'assistant') {
-          for (const block of message.message.content) {
-            if (block.type === 'text') text += block.text
-          }
-        }
+          '<code>\n' + prefix + '<CURSOR>' + suffix + '\n</code>'
       }
-      // A newer request may have aborted this one while its stream drained —
-      // its result is stale, never surface it.
-      if (controller.signal.aborted) return ''
-      // Models occasionally fence the answer anyway — unwrap before use.
-      const unfenced = text.replace(/^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$/, '$1')
-      return this.broker.scrub(unfenced.replace(/\s+$/, ''))
-    } catch (error: any) {
-      if (timedOut || controller.signal.aborted || error?.name === 'AbortError') return ''
-      throw error
+    })
+    session.turns += 1
+
+    const timeout = setTimeout(() => {
+      if (this.session === session) this.disposeSession()
+    }, COMPLETION_TIMEOUT_MS)
+    let text: string
+    try {
+      text = await reply
     } finally {
       clearTimeout(timeout)
-      if (this.activeQuery === session) {
-        this.activeQuery = null
-        this.aborter = null
-      }
-      ;(session as { close?: () => void } | null)?.close?.()
     }
+    if (seq !== this.requestSeq) return ''
+    if (session.turns >= MAX_SESSION_TURNS && this.session === session) {
+      // Recycle: transcripts grow with every completion; a fresh session
+      // resets token cost. The next request pays one spawn.
+      this.disposeSession()
+    }
+    // Models occasionally fence the answer anyway — unwrap before use.
+    const unfenced = text.replace(/^\s*```[^\n]*\n([\s\S]*?)\n?```\s*$/, '$1')
+    return this.broker.scrub(unfenced.replace(/\s+$/, ''))
   }
 }

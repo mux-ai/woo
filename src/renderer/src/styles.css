@@ -1566,6 +1566,14 @@ code, pre, .agent-stream, .context-raw {
   padding: 0;
 }
 .status-toggle:hover { color: var(--text); }
+.status-ai-busy {
+  color: var(--accent, #7aa2f7);
+  animation: status-ai-pulse 1.2s ease-in-out infinite;
+}
+@keyframes status-ai-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
 
 @media (max-width: 1100px) {
   .sidebar { width: 210px; }

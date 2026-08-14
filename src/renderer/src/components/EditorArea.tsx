@@ -200,6 +200,23 @@ const knowledgeCompletionLanguages = new Set<string>()
 // per concrete language id like the popup provider above.
 const inlineCompletionLanguages = new Set<string>()
 
+// In-flight signal for the status bar ("✦ AI…"): the round trip takes
+// seconds, and with no indicator users read the silence as "broken".
+let inlineBusyDepth = 0
+const inlineBusyListeners = new Set<(busy: boolean) => void>()
+
+export function onInlineCompletionBusy(listener: (busy: boolean) => void): () => void {
+  inlineBusyListeners.add(listener)
+  return () => { inlineBusyListeners.delete(listener) }
+}
+
+function setInlineBusy(delta: number): void {
+  const wasBusy = inlineBusyDepth > 0
+  inlineBusyDepth = Math.max(0, inlineBusyDepth + delta)
+  const busy = inlineBusyDepth > 0
+  if (busy !== wasBusy) for (const listener of inlineBusyListeners) listener(busy)
+}
+
 function registerInlineCompletion(languageId: string): void {
   if (languageId === 'plaintext' || inlineCompletionLanguages.has(languageId)) return
   inlineCompletionLanguages.add(languageId)
@@ -225,6 +242,7 @@ function registerInlineCompletion(languageId: string): void {
         endLineNumber: lastLine,
         endColumn: model.getLineMaxColumn(lastLine)
       })
+      setInlineBusy(1)
       try {
         const text = await window.woo.inlineComplete({
           path: modelPath(model),
@@ -247,6 +265,8 @@ function registerInlineCompletion(languageId: string): void {
         }
       } catch {
         return { items: [] }
+      } finally {
+        setInlineBusy(-1)
       }
     },
     freeInlineCompletions() {}
