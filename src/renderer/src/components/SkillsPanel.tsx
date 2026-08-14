@@ -1,20 +1,39 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SkillProvider, SkillInfo, SkillScope } from '../../../shared/types'
 
-const PROVIDER_TITLE: Record<SkillProvider, string> = {
-  claude: 'Claude',
-  codex: 'Codex'
+type SkillTarget = SkillProvider | 'both'
+
+const SCOPE_TITLE: Record<SkillScope, string> = {
+  account: 'Account',
+  project: 'Project'
 }
 
-const SCOPE_HINT: Record<SkillProvider, Record<SkillScope, string>> = {
-  claude: {
-    account: 'Connected account skills (~/.claude/skills) — auto-active in the agent',
-    project: 'This workspace (.claude/skills) — shared via the repo'
-  },
-  codex: {
-    account: 'Connected account skills (~/.codex/skills) — invoke with $name in the terminal',
-    project: 'This workspace (.codex/skills) — shared via the repo'
+const SCOPE_HINT: Record<SkillScope, string> = {
+  account:
+    'Connected account skills (~/.claude/skills, ~/.codex/skills). Claude auto-invokes; Codex uses $name in the terminal.',
+  project: 'This workspace (.claude/skills, .codex/skills) — shared via the repo'
+}
+
+/** One row per skill NAME; the same skill installed for both agents shows
+ *  once, tagged with every provider that carries it. */
+interface MergedSkill {
+  name: string
+  description: string
+  copies: SkillInfo[]
+}
+
+function mergeByName(skills: SkillInfo[]): MergedSkill[] {
+  const byName = new Map<string, MergedSkill>()
+  for (const skill of skills) {
+    const existing = byName.get(skill.name)
+    if (existing) {
+      existing.copies.push(skill)
+      if (!existing.description && skill.description) existing.description = skill.description
+    } else {
+      byName.set(skill.name, { name: skill.name, description: skill.description, copies: [skill] })
+    }
   }
+  return [...byName.values()]
 }
 
 function NewSkillInput({
@@ -49,9 +68,8 @@ export function SkillsPanel({
   onLog: (line: string) => void
 }) {
   const [skills, setSkills] = useState<SkillInfo[]>([])
-  const [creating, setCreating] = useState<{ provider: SkillProvider; scope: SkillScope } | null>(
-    null
-  )
+  const [creating, setCreating] = useState<SkillScope | null>(null)
+  const [target, setTarget] = useState<SkillTarget>('claude')
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -84,90 +102,114 @@ export function SkillsPanel({
     [refresh]
   )
 
-  const openSkill = (skill: SkillInfo) => {
-    if (skill.scope === 'project') {
-      void onOpen(skill.path)
+  const openCopy = (copy: SkillInfo) => {
+    if (copy.scope === 'project') {
+      void onOpen(copy.path)
       return
     }
     // shell.openPath resolves with an error string on failure.
     void act(async () => {
-      const err = await window.woo.skillsOpenExternal(skill.path)
+      const err = await window.woo.skillsOpenExternal(copy.path)
       if (err) throw new Error(err)
     })
   }
 
-  const create = (provider: SkillProvider, scope: SkillScope, name: string) =>
+  const create = (scope: SkillScope, name: string) =>
     act(async () => {
-      const path = await window.woo.skillsCreate(provider, scope, name)
-      onLog(`Created ${provider} ${scope} skill "${name}".`)
-      if (scope === 'project') onOpen(path)
-      else await window.woo.skillsOpenExternal(path)
+      const providers: SkillProvider[] = target === 'both' ? ['claude', 'codex'] : [target]
+      let firstPath: string | null = null
+      for (const provider of providers) {
+        const path = await window.woo.skillsCreate(provider, scope, name)
+        firstPath = firstPath ?? path
+      }
+      onLog(`Created ${scope} skill "${name}" for ${providers.join(' + ')}.`)
+      if (firstPath) {
+        if (scope === 'project') onOpen(firstPath)
+        else await window.woo.skillsOpenExternal(firstPath)
+      }
     })
 
-  const install = (provider: SkillProvider, scope: SkillScope) =>
+  const install = (scope: SkillScope) =>
     act(async () => {
-      const result = await window.woo.skillsInstall(provider, scope)
+      const result = await window.woo.skillsInstall(target, scope)
       if (!result.canceled) onLog(`Installed skill into: ${result.installed.join(', ')}`)
     })
 
-  const remove = (skill: SkillInfo) =>
+  const removeAll = (merged: MergedSkill) =>
     act(async () => {
-      await window.woo.skillsDelete(skill.path)
-      onLog(`Moved skill "${skill.name}" (${skill.provider} ${skill.scope}) to trash.`)
+      for (const copy of merged.copies) {
+        await window.woo.skillsDelete(copy.path)
+      }
+      onLog(
+        `Moved skill "${merged.name}" (${merged.copies.map((c) => c.provider).join(', ')}) to trash.`
+      )
     })
 
-  const renderGroup = (provider: SkillProvider, scope: SkillScope) => {
-    const group = skills.filter((s) => s.provider === provider && s.scope === scope)
-    const isCreating = creating?.provider === provider && creating?.scope === scope
+  const renderScope = (scope: SkillScope) => {
+    const merged = mergeByName(skills.filter((s) => s.scope === scope)).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    )
+    const isCreating = creating === scope
     return (
-      <div key={`${provider}-${scope}`}>
+      <div key={scope}>
         <div className="git-group-title skill-group-title">
           <span>
-            {PROVIDER_TITLE[provider]} · {scope === 'account' ? 'Account' : 'Project'}{' '}
-            {group.length > 0 && <span className="count-pill">{group.length}</span>}
+            {SCOPE_TITLE[scope]}{' '}
+            {merged.length > 0 && <span className="count-pill">{merged.length}</span>}
           </span>
           <span className="tree-actions always">
-            <button
-              title={`New ${provider} ${scope} skill`}
-              onClick={() => setCreating({ provider, scope })}
-            >
+            <button title={`New ${scope} skill (target: ${target})`} onClick={() => setCreating(scope)}>
               ＋
             </button>
             <button
-              title={`Install folder as ${provider} ${scope} skill`}
-              onClick={() => void install(provider, scope)}
+              title={`Install folder as ${scope} skill (target: ${target})`}
+              onClick={() => void install(scope)}
             >
               ⤓
             </button>
           </span>
         </div>
-        <div className="skill-hint">{SCOPE_HINT[provider][scope]}</div>
+        <div className="skill-hint">{SCOPE_HINT[scope]}</div>
         {isCreating && (
           <NewSkillInput
             onCancel={() => setCreating(null)}
             onCommit={(name) => {
               setCreating(null)
-              void create(provider, scope, name)
+              void create(scope, name)
             }}
           />
         )}
-        {group.length === 0 && !isCreating && <div className="panel-empty">No skills.</div>}
-        {group.map((skill) => (
+        {merged.length === 0 && !isCreating && <div className="panel-empty">No skills.</div>}
+        {merged.map((skill) => (
           <div
-            key={skill.path}
+            key={skill.name}
             className="skill-row"
             title={skill.description}
-            onClick={() => openSkill(skill)}
+            onClick={() => openCopy(skill.copies[0])}
           >
             <span className="skill-name">{skill.name}</span>
+            {skill.copies.map((copy) => (
+              <button
+                key={copy.provider}
+                className={`skill-tag skill-tag-${copy.provider}`}
+                title={`Open the ${copy.provider} copy (${copy.path})`}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openCopy(copy)
+                }}
+              >
+                {copy.provider}
+              </button>
+            ))}
             <span className="skill-desc">{skill.description}</span>
             <span className="tree-actions">
               <button
-                title="Delete (moves folder to trash)"
+                title="Delete every copy (moves folders to trash)"
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (window.confirm(`Move skill "${skill.name}" to trash?`)) {
-                    void remove(skill)
+                  const providers = skill.copies.map((c) => c.provider).join(' + ')
+                  if (window.confirm(`Move skill "${skill.name}" (${providers}) to trash?`)) {
+                    void removeAll(skill)
                   }
                 }}
               >
@@ -190,12 +232,22 @@ export function SkillsPanel({
           </button>
         </span>
       </div>
+      <div className="skill-target-row">
+        <span className="skill-hint">＋ / ⤓ target:</span>
+        {(['claude', 'codex', 'both'] as SkillTarget[]).map((option) => (
+          <button
+            key={option}
+            className={`skill-target ${target === option ? 'active' : ''}`}
+            onClick={() => setTarget(option)}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
       {error && <div className="search-error">{error}</div>}
       <div className="panel-scroll">
-        {renderGroup('claude', 'account')}
-        {renderGroup('claude', 'project')}
-        {renderGroup('codex', 'account')}
-        {renderGroup('codex', 'project')}
+        {renderScope('account')}
+        {renderScope('project')}
       </div>
       <div className="skill-footer">
         Account skills follow the signed-in CLI and apply everywhere; project skills ship

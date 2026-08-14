@@ -1497,6 +1497,40 @@ code, pre, .agent-stream, .context-raw {
   font-size: 11px;
   line-height: 1.5;
 }
+.skill-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.skill-tag-claude { color: #d97757; border-color: #d9775766; }
+.skill-tag-codex { color: #7aa2f7; border-color: #7aa2f766; }
+.skill-tag:hover { filter: brightness(1.25); }
+.skill-target-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px 6px;
+}
+.skill-target {
+  padding: 1px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.skill-target.active {
+  background: var(--bg-raised);
+  color: var(--text);
+  border-color: var(--text-faint);
+}
 
 /* ── Vault panel ───────────────────────────────────────── */
 .vault-pass-row {
