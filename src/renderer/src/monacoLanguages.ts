@@ -89,6 +89,10 @@ const loaders: Record<string, () => Promise<void>> = {
     await import('monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution')
     await registerGrammar('kotlin', import('monaco-editor/esm/vs/basic-languages/kotlin/kotlin'))
   },
+  dart: async () => {
+    await import('monaco-editor/esm/vs/basic-languages/dart/dart.contribution')
+    await registerGrammar('dart', import('monaco-editor/esm/vs/basic-languages/dart/dart'))
+  },
   python: async () => {
     await import('monaco-editor/esm/vs/basic-languages/python/python.contribution')
     await registerGrammar('python', import('monaco-editor/esm/vs/basic-languages/python/python'))

@@ -46,6 +46,7 @@ const LANG_BY_EXT: Record<string, string> = {
   toml: 'ini',
   kt: 'kotlin',
   kts: 'kotlin',
+  dart: 'dart',
   py: 'python',
   go: 'go',
   rs: 'rust',

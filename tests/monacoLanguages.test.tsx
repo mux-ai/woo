@@ -107,6 +107,18 @@ describe('ensureMonacoLanguage', () => {
     model.dispose()
   })
 
+  it('registers dart with a working tokenizer (Flutter projects)', async () => {
+    const { monaco } = await import('../src/renderer/src/monacoSetup')
+    const { ensureMonacoLanguage } = await import('../src/renderer/src/monacoLanguages')
+
+    await ensureMonacoLanguage('dart')
+    expect(monaco.languages.getLanguages().map((l) => l.id)).toContain('dart')
+
+    const model = monaco.editor.createModel('class Weather { final String city; }', 'dart')
+    expect(model.getLanguageId()).toBe('dart')
+    model.dispose()
+  })
+
   it('registers javascript too (shares the same loader group as typescript)', async () => {
     const { monaco } = await import('../src/renderer/src/monacoSetup')
     const { ensureMonacoLanguage } = await import('../src/renderer/src/monacoLanguages')
